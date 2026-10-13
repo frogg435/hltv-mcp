@@ -1,0 +1,28 @@
+[project]
+name = "hltv-mcp"
+version = "1.0.0"
+description = "HLTV.org MCP —— 让 AI 直接查询 CS 赛程、赛果、排名、战队、选手与新闻"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "mcp>=2.0",
+    "curl_cffi>=0.7",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
+]
+
+[project.optional-dependencies]
+# 浏览器后端：借用用户自己的 Chrome，用于出口 IP 被拦或需要访问 /stats/*
+# 安装：pip install -e ".[browser]"
+browser = ["playwright>=1.40"]
+
+[project.scripts]
+hltv-mcp = "hltv_mcp.server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

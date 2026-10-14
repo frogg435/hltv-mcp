@@ -185,6 +185,9 @@ class HltvClient:
         # 记住它，后续同类路径直接走浏览器，省掉每次白挨一遍 403。
         self._browser_only_paths: set[str] = set()
         self._hybrid_noted = False
+        # 预热让步开关：有真实请求进来就置位，预热线程看到后立刻收工，
+        # 把带宽和锁让给用户（详见 warmup 的说明）
+        self._warmup_cancel = threading.Event()
 
     # ---------- 会话管理 ----------
 
@@ -275,12 +278,19 @@ class HltvClient:
 
     # ---------- 请求 ----------
 
-    def fetch_html(self, path: str, *, bypass_cache: bool = False) -> str:
+    def fetch_html(self, path: str, *, bypass_cache: bool = False, warmup: bool = False) -> str:
         """抓取一个 HLTV 路径，返回 HTML 字符串。
 
         后端按 `HLTV_BACKEND` 选择（默认 `auto` = 优先浏览器）。
         缓存键带上实际使用的后端，避免降级前后拿到混在一起的结果。
+
+        `warmup=True` 表示这是预热线程发的请求，此时**不**触发让步开关 ——
+        否则预热会把自己叫停。
         """
+        if not warmup:
+            # 有真人在查，预热立刻让路（见 warmup）
+            self._warmup_cancel.set()
+
         if BACKEND == "hybrid":
             return self._fetch_hybrid(path, bypass_cache=bypass_cache)
 
@@ -512,15 +522,27 @@ WARMUP = os.environ.get("HLTV_WARMUP", "1").strip().lower() not in (
     "off",
 )
 
-# 预热时顺手取一页。只取一页就够：目的不是把数据缓存起来（TTL 也留不住），
-# 而是确认「浏览器起来了 + Cloudflare 放行」。多取只是白白消耗请求额度。
+# 预热时依次取这些页面。实测 Cloudflare 对**首访的某些路径**（`/livescore`、
+# `/stats/*`）会额外给一次真挑战，耗时 10-25 秒；在启动时把它们走一遍，
+# 用户查询时这些路径就都是热的了。
 WARMUP_PAGES = tuple(
-    p for p in os.environ.get("HLTV_WARMUP_PAGES", "/matches").split(",") if p.strip()
+    p.strip()
+    for p in os.environ.get(
+        "HLTV_WARMUP_PAGES", "/matches,/livescore,/results,/ranking/teams"
+    ).split(",")
+    if p.strip()
 )
+
+# 预热在继续下一页之前，先等这么久看用户有没有动静。有动静就让路 ——
+# 把「可能触发挑战的慢请求」排到用户查询前面，就本末倒置了。
+WARMUP_IDLE = _env_number("HLTV_WARMUP_IDLE", 8.0)
 
 
 def warmup(*, background: bool = True, pages: tuple[str, ...] | None = None) -> None:
     """提前把浏览器与 Cloudflare 通行证准备好。
+
+    第一页立刻取（通常 1-3 秒，只是建立通行证）；后续几页要等一个「安静窗口」，
+    一旦有真实请求进来就整个收工，把锁和带宽让给用户。
 
     设 `HLTV_WARMUP=0` 可关闭；`HLTV_WARMUP_PAGES` 可改要预取的路径。
     """
@@ -531,6 +553,7 @@ def warmup(*, background: bool = True, pages: tuple[str, ...] | None = None) -> 
 
     def _run() -> None:
         client = get_client()
+        cancel = client._warmup_cancel
         try:
             from .browser import get_browser_fetcher
 
@@ -538,9 +561,16 @@ def warmup(*, background: bool = True, pages: tuple[str, ...] | None = None) -> 
         except Exception as exc:  # noqa: BLE001 - 预热失败不影响正式请求
             _warmup_log(f"浏览器预热失败（正式请求时会重试）：{exc}")
             return
-        for path in targets:
+
+        for index, path in enumerate(targets):
+            if index:
+                # 后续页面先等一个安静窗口。等不到（说明用户正在查）就收工，
+                # 而不是把慢请求堆到用户前面。
+                if cancel.wait(WARMUP_IDLE):
+                    _warmup_log("检测到查询请求，预热提前收工（不影响本次查询）")
+                    return
             try:
-                client.fetch_html(path)
+                client.fetch_html(path, warmup=True)
                 _warmup_log(f"预热完成：{path}")
             except Exception as exc:  # noqa: BLE001
                 _warmup_log(f"预热 {path} 失败（不影响后续请求）：{exc}")

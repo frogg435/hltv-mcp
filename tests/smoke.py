@@ -38,8 +38,6 @@ CASES: list[tuple[str, str, dict]] = [
     ("teammatch", "hltv_get_team_matches", {"name": "FaZe", "limit": 5}),
     ("h2h", "hltv_get_head_to_head", {"team1": "FaZe", "team2": "Vitality", "limit": 5}),
     ("matchstats", "hltv_get_match_stats", {"match_id": 2399253, "map": "Inferno", "side": "ct"}),
-    ("visualize", "hltv_visualize_match",
-     {"match_id": 2399253, "map": "Inferno", "side": "ct"}),
     ("live", "hltv_get_live_scores", {}),
     ("backend", "hltv_backend_status", {}),
     ("news", "hltv_get_news", {"limit": 5}),
@@ -91,9 +89,6 @@ def main() -> int:
         elif "seasons" in payload:
             # 逐年统计：至少有一年拿到了 Rating 才算通过
             ok = any(season.get("rating") for season in payload["seasons"])
-        elif "html" in payload:
-            # 可视化：挑到人了、且网页真的落盘了，才算通过
-            ok = bool(payload.get("players")) and os.path.exists(payload["html"])
         else:
             # 详情类工具：至少要有关键字段
             ok = any(
@@ -136,8 +131,6 @@ def main() -> int:
         elif payload.get("seasons"):
             rated = [x for x in payload["seasons"] if x.get("rating")]
             detail = ", ".join(f"{x['year']}:{x['rating']}" for x in rated[:3])
-        elif "html" in payload:
-            detail = f"{len(payload.get('players') or [])} 人 / {os.path.basename(payload['html'])}"
         elif payload.get("title"):
             detail = str(payload["title"])[:40]
 

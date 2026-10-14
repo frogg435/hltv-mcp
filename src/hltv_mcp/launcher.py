@@ -38,6 +38,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -207,6 +208,65 @@ def _pick_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+def _pid_alive(pid: int) -> bool:
+    """某个进程是否还在。"""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # 进程在，只是不归我们管
+    except OSError:
+        return False
+    return True
+
+
+def _clear_stale_profile_lock() -> str | None:
+    """清掉指向「已经不存在的进程」的 profile 锁；没清任何东西就返回 None。
+
+    为什么需要它：Chrome 靠 profile 目录里的 `SingletonLock` 防止两个实例共用
+    同一个 profile。进程被强杀（`kill -9`）或机器断电时这个锁会留下来，而它指向
+    的 pid 早就没了 —— 此时 Chrome 再启动会**立刻以退出码 21
+    （RESULT_CODE_PROFILE_IN_USE）退出**。更麻烦的是错误信息里只有一句「启动后
+    立刻退出」，完全看不出原因；于是浏览器后端永久起不来、悄悄降级到 HTTP，
+    `/livescore` 404、`/stats/*` 403 跟着一起挂，但**表面上只是「有些工具查不到」**。
+
+    只在**确认锁指向的进程确实不在了**才删 —— 有活进程时删锁会让两个实例共用
+    一个 profile，那是真会写坏数据的。
+    """
+    lock = PROFILE_DIR / "SingletonLock"
+    try:
+        target = os.readlink(lock)
+    except OSError:
+        return None
+
+    match = re.search(r"-(\d+)$", str(target))
+    if not match:
+        return None
+    pid = int(match.group(1))
+    if _pid_alive(pid):
+        return None
+
+    removed: list[str] = []
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        path = PROFILE_DIR / name
+        try:
+            if path.is_symlink() or path.exists():
+                path.unlink()
+                removed.append(name)
+        except OSError:
+            continue
+
+    if not removed:
+        return None
+    return (
+        f"清掉了残留的 profile 锁（{'、'.join(removed)}，原属已退出的进程 {pid}）—— "
+        "上次那个浏览器被强杀时没来得及自己清理，留着会让新实例以「profile 被占用」直接退出。"
+    )
 
 
 def _task_spawn(args, **kwargs):
@@ -448,6 +508,11 @@ class ChromeLauncher:
             )
 
         errors: list[str] = []
+        # 上个实例若被强杀，profile 里会留下死锁，先确认一下再启动
+        note = _clear_stale_profile_lock()
+        if note:
+            print(f"[hltv-mcp] {note}", file=sys.stderr)
+
         for attempt in self._plan_attempts():
             try:
                 return self._spawn(binary, **attempt)
@@ -619,7 +684,13 @@ class ChromeLauncher:
                     pass
                 return url
             if proc.poll() is not None:
-                raise BrowserUnavailable(f"启动后立刻退出（退出码 {proc.returncode}）")
+                hint = ""
+                if proc.returncode == 21:
+                    hint = (
+                        "。退出码 21 = profile 被占用（残留的 SingletonLock 所致），"
+                        f"可手动删掉 {PROFILE_DIR}/Singleton* 后重试"
+                    )
+                raise BrowserUnavailable(f"启动后立刻退出（退出码 {proc.returncode}）{hint}")
             time.sleep(0.4)
 
         raise BrowserUnavailable(f"等待调试端口超时（{STARTUP_TIMEOUT:.0f}s，端口 {port}）")

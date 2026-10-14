@@ -266,6 +266,36 @@ def main() -> int:
     finally:
         stop()
 
+    print("\n--- 11. profile 死锁自愈 ---")
+    # 场景：浏览器被 kill -9 之后，profile 里会留下指向「已经不存在的 pid」的
+    # SingletonLock，此后 Chrome 每次启动都以退出码 21 秒退，浏览器后端永久
+    # 起不来、悄悄降级到 HTTP。这里确认清理逻辑只在进程真的没了时才动手。
+    import tempfile as _tempfile  # noqa: PLC0415
+    from pathlib import Path as _Path  # noqa: PLC0415
+
+    saved_profile = L.PROFILE_DIR
+    with _tempfile.TemporaryDirectory() as tmp:
+        L.PROFILE_DIR = _Path(tmp)
+        lock = L.PROFILE_DIR / "SingletonLock"
+        cookie = L.PROFILE_DIR / "SingletonCookie"
+
+        check("没有锁时安静返回", L._clear_stale_profile_lock(), None)
+
+        # 活锁：指向当前进程，绝不能删
+        lock.symlink_to(f"somehost-{os.getpid()}")
+        check("活锁不清理", L._clear_stale_profile_lock(), None)
+        check("活锁被保留", lock.is_symlink(), True)
+
+        # 死锁：指向一个肯定不存在的 pid
+        lock.unlink()
+        lock.symlink_to("somehost-999999")
+        cookie.symlink_to("12345")
+        note = L._clear_stale_profile_lock()
+        check("死锁被清理且说明里带上原 pid", bool(note) and "999999" in str(note), True)
+        check("死锁文件已删除", lock.is_symlink(), False)
+        check("Cookie 一并清掉", cookie.is_symlink(), False)
+    L.PROFILE_DIR = saved_profile
+
     print()
     if failures:
         print(f"{len(failures)} 项失败：{', '.join(failures)}")

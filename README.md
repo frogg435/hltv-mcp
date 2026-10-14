@@ -111,7 +111,6 @@ python3 -m venv .venv
 | `hltv_get_news_article` | 新闻正文 |
 | `hltv_get_events` | 赛事日历 |
 | `hltv_backend_status` | 当前用哪种后端、浏览器是否可用；排查「查不到数据」时先调它 |
-| `hltv_visualize_match` | **数据可视化**：把某场选手数据渲染成**一个网页** —— 每人一张六边形面板图（K/D、Rating、KAST、Swing、ADR、爆头率）+ 指标柱状图 + 数值表 |
 
 全部只读，没有任何写操作。
 
@@ -336,42 +335,6 @@ python scripts/health.py          # HTTP 后端：定位是 IP 级封禁还是�
 * **比赛页的 "Detailed stats" 指向另一套 ID。** 比赛页是 `/matches/{id}`，
   统计页是 `/stats/matches/{另一个id}`，两者不通用，得先从比赛页里取出来。
 
-### 数据可视化
-
-`hltv_visualize_match` 把一场比赛的选手数据渲染成**一个网页**，浏览器打开即可：
-
-| 区块 | 内容 |
-|---|---|
-| **六维面板图** | **每人一张**的六边形面板图，六个顶点顺时针 = K/D、Rating、KAST、Swing、ADR、爆头率；按队伍排成网格（两队各 5 人即 10 张）|
-| **指标柱状图** | 每位选手一组、组内六根柱子对应六个指标；鼠标悬停在柱子上可看原始数值 |
-| **原始数值表** | 图上看到的是形状，精确数字在这里 |
-
-```jsonc
-// hltv_visualize_match(match_id=2399385, map="Ancient", side="both")
-{
-  "players": [{"nickname": "m0NESY", "team": "Falcons",
-               "kd": 1.74, "rating": 1.62, "kast": 75.0,
-               "swing": 7.17, "adr": 89.9, "hs": 42.5}],
-  "html": "/path/hltv-2399385-Ancient-both-20261014-233247.html"
-}
-```
-
-几个取舍：
-
-* **做成网页，而不是 svg / png 文件。** 十张面板图要排网格、窄屏要能换行、悬停要看数值 ——
-  这些在网页里是 `grid` / media query / `<title>` 白送的；硬拼成一张大 SVG 就得自己算每个
-  小图的坐标与留白。图仍然是 SVG 画的（矢量、清晰、可缩放），只是装在一个网页里交付。
-* **每人一张，而不是十个人叠在一张雷达图上。** 叠起来超过四五个人就糊成一团、配色也不够用；
-  一人一张放得下整队，而十张图的轴顺序完全一致，所以只在页面顶部放一张「轴示意」统一说明读法。
-* **归一化参考区间**：六个指标量纲差得远（Rating 是 0.6–1.8 的比值、ADR 几十到一百多、
-  Swing 还带正负号），画进同一坐标系必须先映射到 0–1。区间写在 `src/hltv_mcp/viz.py` 的
-  `METRICS` 里，按「职业比赛的常见跨度」调过 —— 取宽了十个人全挤在中间看不出差别，
-  取窄了正常数据又会顶到外圈。所以**图形只用于横向比强弱，精确数值一律以原始形式给出**
-  （柱状图悬停 + 数值表）。
-* **爆头率是算出来的**：HLTV 表格里给的是 `eK (hs)`（击杀数（爆头数）），所以 HS% = hs / kills。
-
-产物默认落在 `~/.cache/hltv-mcp/charts/`，可用 `HLTV_VIZ_DIR` 改。
-
 ### 关于 `/stats/*` 与逐年 Rating
 
 `/stats/*` 路径（含**逐年 Rating** 所在的统计页）在 HTTP 后端下会被 Cloudflare 拦截。
@@ -468,7 +431,6 @@ python scripts/hltv_inspect.py /team/6667/x --selector .profile-team-stat
 | `HLTV_CHALLENGE_WAIT` | `25` | 等 Cloudflare 挑战通过的上限（秒） |
 | `HLTV_CHALLENGE_POLL` | `0.6` | 挑战轮询间隔（秒） |
 | `HLTV_BLOCK_ASSETS` | `0` | 置 `1` 拦掉图片/字体/广告统计脚本。实测 HLTV 以服务端渲染的 HTML 为主，桌面端开了反而略慢；弱设备可以自己试 |
-| `HLTV_VIZ_DIR` | 缓存目录 `/charts` | `hltv_visualize_match` 产出图片的目录 |
 | `HLTV_IMPERSONATE` | `safari17_0` | HTTP 后端的 TLS 指纹，可选 `chrome131`、`firefox135` 等 |
 
 也识别标准的 `HTTPS_PROXY` / `ALL_PROXY`。

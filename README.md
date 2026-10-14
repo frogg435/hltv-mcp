@@ -43,12 +43,6 @@ python3 -m venv .venv
 用来提供「界面上看不见」的虚拟显示。装不了浏览器（比如 CI）就改用 HTTP 后端：
 `pip install -e ".[http]"` 并设置 `HLTV_BACKEND=http`。
 
-想让 `hltv_visualize_match` 直接产出 PNG，再装一个可选的转换器（不装就只能给 SVG）：
-
-```bash
-pip install -e ".[viz]"     # 等价于 pip install cairosvg
-```
-
 ## 接入 MCP 客户端
 
 在客户端的 MCP 配置里加上：
@@ -117,7 +111,7 @@ pip install -e ".[viz]"     # 等价于 pip install cairosvg
 | `hltv_get_news_article` | 新闻正文 |
 | `hltv_get_events` | 赛事日历 |
 | `hltv_backend_status` | 当前用哪种后端、浏览器是否可用；排查「查不到数据」时先调它 |
-| `hltv_visualize_match` | **数据可视化**：把某场选手数据画成六边形面板图（K/D、Rating、KAST、Swing、ADR、爆头率）与柱状图，产出 SVG / PNG / HTML |
+| `hltv_visualize_match` | **数据可视化**：把某场选手数据渲染成**一个网页** —— 每人一张六边形面板图（K/D、Rating、KAST、Swing、ADR、爆头率）+ 指标柱状图 + 数值表 |
 
 全部只读，没有任何写操作。
 
@@ -344,47 +338,39 @@ python scripts/health.py          # HTTP 后端：定位是 IP 级封禁还是�
 
 ### 数据可视化
 
-`hltv_visualize_match` 把一场比赛的选手数据直接画成图，两种图各管一件事：
+`hltv_visualize_match` 把一场比赛的选手数据渲染成**一个网页**，浏览器打开即可：
 
-| 图 | 看什么 |
+| 区块 | 内容 |
 |---|---|
-| **六边形面板图** | 六个轴 = K/D、Rating、KAST、Swing、ADR、爆头率。多位选手叠在一起，看的是**强弱结构**——谁在哪几个维度上撑开了 |
-| **柱状图** | 同样的六个指标，按指标分组，每组内每人一根柱子。柱顶标的是**原始数值**，纵轴是归一化后的相对高度 |
+| **六维面板图** | **每人一张**的六边形面板图，六个顶点顺时针 = K/D、Rating、KAST、Swing、ADR、爆头率；按队伍排成网格（两队各 5 人即 10 张）|
+| **指标柱状图** | 每位选手一组、组内六根柱子对应六个指标；鼠标悬停在柱子上可看原始数值 |
+| **原始数值表** | 图上看到的是形状，精确数字在这里 |
 
 ```jsonc
-// hltv_visualize_match(match_id=2399385, map="Ancient", side="both",
-//                      players="m0NESY,NiKo", chart="both", format="all")
+// hltv_visualize_match(match_id=2399385, map="Ancient", side="both")
 {
   "players": [{"nickname": "m0NESY", "team": "Falcons",
-               "kd": 1.73, "rating": 1.64, "kast": 69.0,
-               "swing": 7.46, "adr": 93.9, "hs": 34.62}],
-  "files": {
-    "svg":  "/path/hltv-2399385-Ancient-both-20261014-232106.svg",
-    "png":  "/path/hltv-2399385-Ancient-both-20261014-232106.png",
-    "html": "/path/hltv-2399385-Ancient-both-20261014-232106.html"
-  }
+               "kd": 1.74, "rating": 1.62, "kast": 75.0,
+               "swing": 7.17, "adr": 89.9, "hs": 42.5}],
+  "html": "/path/hltv-2399385-Ancient-both-20261014-233247.html"
 }
 ```
 
-输出三种格式，`format` 默认 `svg`：
+几个取舍：
 
-| 格式 | 什么时候用 |
-|---|---|
-| `svg`（默认） | 矢量、纯文本，能无损缩放，也能随手改 |
-| `png` | 贴进聊天窗口、文档、IM 最方便 |
-| `html` | 双击直接看，外面套了一层卡片样式 |
-| `all` | 三种都要 |
+* **做成网页，而不是 svg / png 文件。** 十张面板图要排网格、窄屏要能换行、悬停要看数值 ——
+  这些在网页里是 `grid` / media query / `<title>` 白送的；硬拼成一张大 SVG 就得自己算每个
+  小图的坐标与留白。图仍然是 SVG 画的（矢量、清晰、可缩放），只是装在一个网页里交付。
+* **每人一张，而不是十个人叠在一张雷达图上。** 叠起来超过四五个人就糊成一团、配色也不够用；
+  一人一张放得下整队，而十张图的轴顺序完全一致，所以只在页面顶部放一张「轴示意」统一说明读法。
+* **归一化参考区间**：六个指标量纲差得远（Rating 是 0.6–1.8 的比值、ADR 几十到一百多、
+  Swing 还带正负号），画进同一坐标系必须先映射到 0–1。区间写在 `src/hltv_mcp/viz.py` 的
+  `METRICS` 里，按「职业比赛的常见跨度」调过 —— 取宽了十个人全挤在中间看不出差别，
+  取窄了正常数据又会顶到外圈。所以**图形只用于横向比强弱，精确数值一律以原始形式给出**
+  （柱状图悬停 + 数值表）。
+* **爆头率是算出来的**：HLTV 表格里给的是 `eK (hs)`（击杀数（爆头数）），所以 HS% = hs / kills。
 
-PNG 需要一个转换器，按 `cairosvg` → `rsvg-convert` → ImageMagick `convert` 的顺序找；
-**三条路都不通时只产出 SVG，不算失败**（`notes` 里会说明原因）。
-
-**关于「归一化」**：六个指标量纲差得远 —— Rating 是 0.5–2 的比值，ADR 是几十到一百多，
-Swing 还带正负号 —— 画进同一个坐标系必须先映射到 0–1，参考区间写在
-`src/hltv_mcp/viz.py` 的 `METRICS` 里。所以**图上的形状只用来横向比强弱，真实数值一律
-照原样标出来**：柱顶写的是原始值，雷达图下方也逐条列出了每个轴用的区间。
-
-> 爆头率不在 HLTV 的表格里，是**算出来的**：表里给的是 `eK (hs)`（击杀数（爆头数）），
-> 所以 HS% = hs / kills。
+产物默认落在 `~/.cache/hltv-mcp/charts/`，可用 `HLTV_VIZ_DIR` 改。
 
 ### 关于 `/stats/*` 与逐年 Rating
 
@@ -461,7 +447,7 @@ python scripts/hltv_inspect.py /team/6667/x --selector .profile-team-stat
 |---|---|---|
 | `HLTV_BACKEND` | `auto` | 后端：`auto`（优先浏览器）/ `browser`（强制）/ `http`（强制 HTTP）/ `hybrid`（HTTP 优先，被拦自动换浏览器） |
 | `HLTV_WARMUP` | `1` | 启动时后台预热浏览器，让第一次查询不必等冷启动。置 `0` 关闭 |
-| `HLTV_WARMUP_PAGES` | `/matches,/livescore,/results,/ranking/teams` | 预热依次取这些页面。实测 Cloudflare 对**首访的某些路径**（`/livescore`、`/stats/*`）会额外给一次真挑战，要 10–25 秒；在启动时走一遍，用户查询时就是热的 |
+| `HLTV_WARMUP_PAGES` | `/matches,/livescore,/results,/ranking/teams,/search` | 预热依次取这些页面。实测 Cloudflare 对**首访的某些路径**（`/livescore`、`/search`、`/stats/*`）会额外给一次真挑战，要 10–25 秒；在启动时走一遍，用户查询时就是热的 |
 | `HLTV_WARMUP_IDLE` | `8` | 预热继续下一页之前，先等这么多秒看用户有没有动静。有请求就让路收工 |
 | `HLTV_BROWSER_CDP` | 空 | 复用一个**外部已启动**的浏览器，如 `http://127.0.0.1:9222`。留空则由本服务自动准备 |
 | `HLTV_BROWSER_AUTOLAUNCH` | `1` | 置 `0` 则禁止自动拉起浏览器，只复用已有实例 |

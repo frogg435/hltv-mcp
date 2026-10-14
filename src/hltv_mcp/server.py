@@ -26,7 +26,7 @@ MAX_LIMIT = 100
 server = MCPServer(
     name="hltv",
     title="HLTV.org",
-    version="1.5.0",
+    version="1.6.0",
     instructions=(
         "查询 HLTV.org 的 Counter-Strike 赛事数据：赛程、赛果、世界排名、战队、选手、"
         "新闻与赛事日历。所有工具都接受数字 id 或名称（如 \"Vitality\"、\"ZywOo\"），"
@@ -701,9 +701,9 @@ def _to_float(value: Any) -> float:
 @server.tool(
     name="hltv_visualize_match",
     description=(
-        "把一场比赛的选手数据画成图：**六边形面板图**（六个轴 = K/D、Rating、KAST、"
-        "Swing、ADR、爆头率）与**柱状图**。默认产出 SVG 文件，也可另存 PNG / HTML，"
-        "返回文件路径。想直观看出几位选手的强弱结构、或做赛后对比时用它。"
+        "把一场比赛的选手数据画成**一个网页**：每人一张六边形面板图"
+        "（六个轴 = K/D、Rating、KAST、Swing、ADR、爆头率）、指标柱状图、原始数值表。"
+        "返回网页文件的绝对路径，用浏览器打开即可。做赛后对比时用它最直观。"
     ),
 )
 def hltv_visualize_match(
@@ -711,20 +711,15 @@ def hltv_visualize_match(
     map: str = "all",
     side: str = "both",
     players: str | None = None,
-    chart: str = "both",
-    format: str = "svg",
-    per_team: int = 2,
+    per_team: int = 5,
 ) -> str:
     """
     Args:
         match_id: 比赛 ID（由 hltv_get_matches / hltv_get_results 得到）。
         map: 地图名（如 "Ancient"）；"all" 表示全部地图合计。
-        side: both（合计）/ t / ct。可视化一次只画一个阵营。
-        players: 逗号分隔的昵称，例如 "m0NESY,NiKo"；省略则自动挑选。
-        chart: radar（六边形面板图）/ bars（柱状图）/ both（默认，两张都出）。
-        format: svg（默认）/ png / html / all。无论选哪个都会写一份 SVG ——
-            它是源文件，也是 PNG 转换失败时的兜底。
-        per_team: 自动挑人时每队取 Rating 最高的前几名，默认 2（两队共 4 人）。
+        side: both（合计）/ t / ct。一次只画一个阵营。
+        players: 逗号分隔的昵称，例如 "m0NESY,NiKo"；省略则每队取 Rating 最高的 per_team 位。
+        per_team: 自动挑人时每队取几位，默认 5（即两队首发各 5 人，共 10 张面板图）。
     """
     import time as _time
 
@@ -733,18 +728,10 @@ def hltv_visualize_match(
     try:
         side_key = (side or "both").strip().lower()
         if side_key == "all":
-            # 一张图里区分三个阵营会糊成一团，取合计更有信息量
+            # 三个阵营画在一起会糊成一团，取合计更有信息量
             side_key = "both"
         if side_key not in ("both", "ct", "t"):
             return _dump({"error": f"side 只支持 both / t / ct，收到 {side!r}"})
-
-        chart_key = (chart or "both").strip().lower()
-        if chart_key not in ("radar", "bars", "both"):
-            return _dump({"error": f"chart 只支持 radar / bars / both，收到 {chart!r}"})
-
-        fmt = (format or "svg").strip().lower()
-        if fmt not in ("svg", "png", "html", "all"):
-            return _dump({"error": f"format 只支持 svg / png / html / all，收到 {format!r}"})
 
         raw = json.loads(hltv_get_match_stats(match_id, map=map, side=side_key))
         if raw.get("error"):
@@ -758,8 +745,8 @@ def hltv_visualize_match(
             return _dump({"error": f"这一场没有 {side_key} 的数据"})
 
         wanted = {n.strip().lower() for n in (players or "").split(",") if n.strip()}
-        series: list[viz.Series] = []
-        for block in side_blocks:
+        blocks: list[viz.TeamBlock] = []
+        for index, block in enumerate(side_blocks):
             rows = list(block.get("players") or [])
             if wanted:
                 rows = [r for r in rows if str(r.get("nickname", "")).lower() in wanted]
@@ -767,13 +754,23 @@ def hltv_visualize_match(
                 rows = sorted(
                     rows, key=lambda r: _to_float(r.get("rating")), reverse=True
                 )[: max(1, int(per_team))]
-            series.extend(viz.series_from_match_stats(block.get("team") or "", rows))
+            series = viz.series_from_match_stats(block.get("team") or "", rows)
+            if not series:
+                continue
+            color, light = viz.TEAM_COLORS[index % len(viz.TEAM_COLORS)]
+            blocks.append(
+                viz.TeamBlock(
+                    name=block.get("team") or "",
+                    color=color,
+                    light=light,
+                    players=series,
+                )
+            )
 
-        notes: list[str] = []
-        if not series:
+        if not blocks:
             return _dump(
                 {
-                    "error": "没有匹配到选手。检查 players 的拼写，或去掉 players 让工具自动挑选。",
+                    "error": "没有匹配到选手。检查 players 的拼写，或去掉 players 让工具自动挑人。",
                     "available": [
                         p.get("nickname")
                         for block in side_blocks
@@ -781,70 +778,46 @@ def hltv_visualize_match(
                     ],
                 }
             )
-        if len(series) > len(viz.PALETTE):
-            notes.append(
-                f"一次最多画 {len(viz.PALETTE)} 位选手（配色数量限制），已截断到前 {len(viz.PALETTE)} 位。"
-            )
-            series = series[: len(viz.PALETTE)]
 
         map_label = "全部地图" if str(map).lower() == "all" else str(map)
         side_label = {"both": "双方合计", "ct": "CT 方", "t": "T 方"}[side_key]
-        base_title = f"{map_label} · {side_label}"
-        subtitle = " vs ".join([b.get("team") or "" for b in side_blocks if b.get("team")])
+        title = f"{map_label} · {side_label}"
+        subtitle = " vs ".join(b.name for b in blocks if b.name)
 
-        parts = []
-        if chart_key in ("radar", "both"):
-            parts.append(viz.radar_svg(series, title=f"{base_title} · 六维面板图", subtitle=subtitle))
-        if chart_key in ("bars", "both"):
-            parts.append(viz.bar_svg(series, title=f"{base_title} · 指标柱状图", subtitle=subtitle))
-        svg_text = viz.stack_svgs(parts) if len(parts) > 1 else parts[0][0]
+        notes = [
+            "图形按各指标的常见区间归一化后绘制，只用于横向比较强弱",
+            "精确数值见页面底部的原始数据表",
+        ]
+        html = viz.render_page(blocks, title=title, subtitle=subtitle, notes=notes)
 
         out_dir = viz.default_out_dir()
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
+            stamp = _time.strftime("%Y%m%d-%H%M%S")
+            slug = re.sub(r"[^A-Za-z0-9]+", "", str(map)) or "all"
+            path = out_dir / f"hltv-{int(match_id)}-{slug}-{side_key}-{stamp}.html"
+            path.write_text(html, encoding="utf-8")
         except OSError as exc:
-            return _dump({"error": f"无法创建输出目录 {out_dir}：{exc}"})
-
-        stamp = _time.strftime("%Y%m%d-%H%M%S")
-        slug = re.sub(r"[^A-Za-z0-9]+", "", str(map)) or "all"
-        stem = f"hltv-{int(match_id)}-{slug}-{side_key}-{stamp}"
-
-        files: dict[str, str] = {}
-        # SVG 永远写一份：它是源文件，也是 PNG 转换失败时的兜底
-        svg_path = out_dir / f"{stem}.svg"
-        svg_path.write_text(svg_text, encoding="utf-8")
-        files["svg"] = str(svg_path)
-
-        if fmt in ("png", "all"):
-            png_path = out_dir / f"{stem}.png"
-            ok, how = viz.svg_to_png(svg_text, png_path)
-            if ok:
-                files["png"] = str(png_path)
-            else:
-                notes.append(how)
-        if fmt in ("html", "all"):
-            html_path = out_dir / f"{stem}.html"
-            html_path.write_text(viz.wrap_html(svg_text, title=base_title), encoding="utf-8")
-            files["html"] = str(html_path)
+            return _dump({"error": f"无法写入网页文件（{out_dir}）：{exc}"})
 
         return _dump(
             {
                 "match_id": int(match_id),
                 "map": map,
                 "side": side_key,
-                "chart": chart_key,
+                "title": title,
                 "players": [
                     {
-                        "nickname": s.name,
-                        "team": s.team,
-                        **{k: round(v, 2) for k, v in s.values.items()},
+                        "nickname": player.name,
+                        "team": block.name,
+                        **{k: round(v, 2) for k, v in player.values.items()},
                     }
-                    for s in series
+                    for block in blocks
+                    for player in block.players
                 ],
                 "metrics": [m.label for m in viz.METRICS],
-                "files": files,
-                "notes": notes,
-                "hint": "svg 是矢量原图，png 方便直接贴出，html 适合双击打开。",
+                "html": str(path),
+                "hint": "用浏览器打开这个文件：里面有每人一张的六边形面板图、指标柱状图，以及原始数值表。",
             }
         )
     except HltvError as exc:

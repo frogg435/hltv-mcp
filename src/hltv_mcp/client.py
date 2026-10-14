@@ -528,7 +528,10 @@ WARMUP = os.environ.get("HLTV_WARMUP", "1").strip().lower() not in (
 WARMUP_PAGES = tuple(
     p.strip()
     for p in os.environ.get(
-        "HLTV_WARMUP_PAGES", "/matches,/livescore,/results,/ranking/teams"
+        "HLTV_WARMUP_PAGES",
+        # /search 不能漏：所有「按名字查」的调用（hltv_get_team/player/event…）
+        # 都要先过它，实测它同样会被首访挑战，一次就要多等三十来秒
+        "/matches,/livescore,/results,/ranking/teams,/search",
     ).split(",")
     if p.strip()
 )

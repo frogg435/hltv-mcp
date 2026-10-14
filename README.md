@@ -31,6 +31,12 @@ python3 -m venv .venv
 .venv/bin/pip install -e .
 ```
 
+依赖里包含 `playwright`，但**不需要执行 `playwright install`** —— 本项目不下载
+Playwright 自带的浏览器，而是通过 CDP 驱动**你本机已有的 Chrome**。
+
+前提是本机装了 Chrome / Chromium / Edge 之一（三选一即可）。装不了浏览器（比如 CI）
+就改用 HTTP 后端：`pip install -e ".[http]"` 并设置 `HLTV_BACKEND=http`。
+
 ## 接入 MCP 客户端
 
 在客户端的 MCP 配置里加上：
@@ -59,6 +65,19 @@ python3 -m venv .venv
 }
 ```
 
+**不需要任何环境变量。** 首次调用时服务会自动拉起一个浏览器（用独立 profile），
+之后复用；MCP 退出时自动关掉它。几个可选的调优项：
+
+```json
+{
+  "env": {
+    "HLTV_BACKEND": "auto",
+    "HLTV_MIN_INTERVAL": "3.0",
+    "HLTV_BROWSER_HEADLESS": "0"
+  }
+}
+```
+
 ## 工具清单
 
 | 工具 | 说明 |
@@ -71,18 +90,28 @@ python3 -m venv .venv
 | `hltv_get_team` | 战队资料：排名、教练、阵容 |
 | `hltv_get_player` | 选手资料：Rating 3.0、能力评分、生涯荣誉汇总 |
 | `hltv_get_player_career` | **选手逐年生涯**：历年在哪支队、历年 Top20 排名、奖项、冠军、MVP |
-| `hltv_get_player_year_stats` | **选手逐年 Rating 与详细数据**：Rating、K/D、ADR、地图数、对 Top5/10/20 对手的 Rating（需浏览器后端）|
-| `hltv_get_match_stats` | **单场比赛逐地图、分阵营（CT/T）的选手数据**：Op.K-D、多杀、KAST、1vX、爆头、ADR、Rating（需浏览器后端）|
+| `hltv_get_player_year_stats` | **选手逐年 Rating 与详细数据**：Rating、K/D、ADR、地图数、对 Top5/10/20 对手的 Rating |
+| `hltv_get_match_stats` | **单场比赛逐地图、分阵营（CT/T）的选手数据**：Op.K-D、多杀、KAST、1vX、爆头、ADR、Rating |
 | `hltv_get_event` | 赛事详情：奖金池、日期、地点、VRS 权重、参赛队、名次与奖金分配 |
 | `hltv_get_team_matches` | 战队近期战绩：日期、对手、比分、胜负 |
 | `hltv_get_head_to_head` | 两队交手记录：逐地图明细 + 按地图聚合胜率 |
 | `hltv_get_news` | 新闻列表 |
 | `hltv_get_news_article` | 新闻正文 |
 | `hltv_get_events` | 赛事日历 |
+| `hltv_backend_status` | 当前用哪种后端、浏览器是否可用；排查「查不到数据」时先调它 |
 
 全部只读，没有任何写操作。
 
 ## 工作原理与已知限制
+
+### 取页面的两种方式
+
+| 后端 | 怎么用 | 特点 |
+|---|---|---|
+| **浏览器**（默认） | 用真实浏览器取页面 | 过 Cloudflare 最稳；唯一能做点击交互；稍慢、需要本机有浏览器 |
+| **HTTP** | `curl_cffi` + Safari TLS 指纹 | 快、轻、无需浏览器；但过不了 Cloudflare 的路径级规则 |
+
+`HLTV_BACKEND=auto`（默认）/ `browser` / `http` 控制选择，见下文「后端选择」。
 
 ### Cloudflare
 
@@ -94,10 +123,11 @@ HLTV 在 Cloudflare 之后。实测（**在出口 IP 干净的前提下**）：
 | `got-scraping`（Chrome TLS 指纹） | ❌ 403 |
 | `curl_cffi` + Chrome / Firefox / Edge 指纹 | ❌ 403 |
 | **`curl_cffi` + Safari 指纹** | ✅ **200，正常页面** |
+| **真实浏览器** | ✅ **200，含 /stats/\*** |
 
-所以客户端用 `curl_cffi` 且 `impersonate="safari17_0"`。换网络环境后最优指纹可能不同，可用 `HLTV_IMPERSONATE` 覆盖。
+HTTP 后端用 `curl_cffi` 且 `impersonate="safari17_0"`。换网络环境后最优指纹可能不同，可用 `HLTV_IMPERSONATE` 覆盖。
 
-### 出口 IP 与浏览器后端
+### 后端：默认用真实浏览器
 
 Cloudflare 按 **IP 累积信誉**，封禁会逐级升级：
 
@@ -105,7 +135,7 @@ Cloudflare 按 **IP 累积信誉**，封禁会逐级升级：
 干净 IP  →  某条路径被拦（如 /stats/*）  →  整站 403（首页也进不去）
 ```
 
-但**换客户端伪装是没用的** —— 我们实测过，结果如下：
+进了第二、三阶段后，**换客户端伪装是没用的** —— 我们实测过：
 
 | 尝试 | 结果 |
 |---|---|
@@ -113,46 +143,73 @@ Cloudflare 按 **IP 累积信誉**，封禁会逐级升级：
 | 无头 Chromium / 有头 Chromium（Xvfb）/ 有头真实 Chrome | 全部 403 |
 | 加 stealth 脚本（抹 `navigator.webdriver` 等） | 无效 |
 
-**真正有效的做法是借用用户自己的浏览器**。实测对照（**同一 IP、同一时刻**）：
+**真正有效的做法是用真实浏览器。** 实测对照（**同一 IP、同一时刻**）：
 
 | 方式 | `/` | `/stats/players/individual/11816/ropz` |
 |---|---|---|
 | `curl_cffi`（Safari 指纹） | ❌ 403 | ❌ 403 |
-| **CDP 连接真实 Chrome 的默认配置文件** | ✅ **200** | ✅ **200** |
+| **真实浏览器 + 持久化配置文件** | ✅ **200** | ✅ **200** |
 
-差异不在「有头/无头」，而在两点：**真实浏览器的完整指纹**，以及**使用 Chrome 的默认持久化配置文件上下文**（`browser.contexts[0]`）。用 `new_context()` 新建的匿名上下文同样会被拦。
+差异不在「有头/无头」，而在两点：**真实浏览器的完整指纹**，以及**使用持久化配置文件上下文**（`browser.contexts[0]`）。用 `new_context()` 新建的匿名上下文同样会被拦。
 
-所以本项目提供**浏览器后端**：
+所以**默认后端就是浏览器**，并且**开箱即用** —— 不需要你先敲命令启动 Chrome：
 
 ```bash
-# 1. 带远程调试端口启动 Chrome（保持开着）
-#    macOS
-/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222
-#    Windows
-"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
-#    Linux
-google-chrome --remote-debugging-port=9222
-
-# 2. 告诉 MCP 走浏览器后端
-export HLTV_BROWSER_CDP=http://127.0.0.1:9222
-
-# 3. 自检
+# 什么都不用配，直接用。（首次会在 ~/.cache/hltv-mcp 建立独立 profile）
 python scripts/browser_check.py
 ```
 
-安全边界：只借用浏览器的网络栈取页面，**绝不关闭你的浏览器**，不读取也不导出 cookie。
-用户如需登录态，自己在浏览器里登录即可，本项目不经手任何账号密码。
+启动器会自动完成这些事：
+
+1. 若已有带调试端口的浏览器在跑（或你设了 `HLTV_BROWSER_CDP`），直接复用
+2. 否则自己拉起一个 Chrome，用**独立的持久化 profile**（位于 `~/.cache/hltv-mcp/chrome-profile`）
+3. MCP 退出时**只关掉自己拉起的那个实例**；你自己的浏览器不会被碰
+
+独立 profile 不是随便选的：一是避免拿你日常的浏览数据去开调试端口，二是 Chrome 在同
+profile 已有实例运行时，新进程只会把标签页塞进旧实例、调试端口根本不会打开。它还有个
+副作用是好的 —— profile 持久化后 `cf_clearance` 会留存，后续启动遇到的挑战明显更少。
+
+安全边界：**绝不关闭你的浏览器**，不读取也不导出 cookie。用户如需登录态，自己在浏览器里
+登录即可，本项目不经手任何账号密码。
+
+#### 无头模式会被拦（实测）
+
+一个必须说清楚的点：**`--headless` 会被 Cloudflare 拦**。
+
+| 模式 | 首页 | `/matches` | `/stats/players/...` |
+|---|---|---|---|
+| `--headless=new` | ❌ 挑战页 | ❌ 挑战页 | ❌ 挑战页 |
+| 有头（含 Xvfb 虚拟显示） | ✅ 200 | ✅ 200 | ✅ **964KB** |
+
+所以「没有显示器」时**不能**直接退化成无头 —— 那等于静默失效。本项目的做法是：Linux 上
+若检测到没有可用显示且有 Xvfb，就**自己造一个虚拟显示**（如 `:99`），让浏览器仍以有头模式
+运行。实测这条路径在容器里同样可用，退出时会连虚拟显示一起收掉。
+
+不用 Xvfb 也没关系：只要有显示环境（桌面系统），走的就是普通有头模式。
+
+### 后端选择
+
+| `HLTV_BACKEND` | 行为 |
+|---|---|
+| `auto`（默认） | **优先浏览器**；只有浏览器**根本起不来**时才降级到 HTTP |
+| `browser` | 强制浏览器。起不来就报错，不降级 |
+| `http` | 强制 HTTP。适合装不了浏览器的环境（CI、纯容器） |
+
+注意 `auto` 的降级边界：**「页面被 Cloudflare 拦」不算「起不来」**，那种情况不会降级 ——
+因为 HTTP 后端会拿到同样的拦截页，降级只会把错误变得更难理解。只有「找不到浏览器 / 连不上
+调试端口 / 启动超时」这类才降级，且会在 stderr 提示一次并转到 HTTP。
 
 ### 先诊断，再动手
 
-遇到 403 先跑诊断脚本，它会告诉你问题出在哪一层：
-
 ```bash
-python scripts/health.py
+python scripts/browser_check.py   # 默认后端：检查浏览器能不能用、能不能取到 HLTV
+python scripts/health.py          # HTTP 后端：定位是 IP 级封禁还是路径级拦截
 ```
 
-- **首页也 403** → IP 或客户端真实度不够，改用浏览器后端（见上）或换出口 IP
-- **只有个别路径 403** → 路径级规则（`/stats/*` 属于此类），**浏览器后端可以绕过**
+`health.py` 的判读方式：
+
+- **首页也 403** → IP 级封禁。换出口 IP，或改用默认的浏览器后端
+- **只有个别路径 403** → 路径级规则（`/stats/*` 属于此类），浏览器后端不受影响
 
 也可用代理（`HLTV_PROXY`）换出口。住宅 IP 效果最好；机房 IP 通常同样会被拦。
 
@@ -245,30 +302,41 @@ python scripts/hltv_inspect.py /team/6667/x --selector .profile-team-stat
 
 | 环境变量 | 默认 | 说明 |
 |---|---|---|
-| `HLTV_BROWSER_CDP` | 空 | 浏览器后端：CDP 地址，如 `http://127.0.0.1:9222`。启用后可访问 `/stats/*`（逐年 Rating）|
+| `HLTV_BACKEND` | `auto` | 后端：`auto`（优先浏览器）/ `browser`（强制）/ `http`（强制 HTTP） |
+| `HLTV_BROWSER_CDP` | 空 | 复用一个**外部已启动**的浏览器，如 `http://127.0.0.1:9222`。留空则由本服务自动准备 |
+| `HLTV_BROWSER_AUTOLAUNCH` | `1` | 置 `0` 则禁止自动拉起浏览器，只复用已有实例 |
+| `HLTV_BROWSER_HEADLESS` | 自动 | 置 `1` 强制无头。**注意无头会被 Cloudflare 拦**，非必要别开 |
+| `HLTV_CHROME_BIN` | 自动探测 | 浏览器可执行文件路径（Chrome/Chromium/Edge） |
+| `HLTV_BROWSER_PORT` | `9222` | 自动启动时优先使用的调试端口，被占则自动换 |
+| `HLTV_CHROME_PROFILE` | `~/.cache/hltv-mcp/chrome-profile` | 自动启动时用的独立 profile 目录 |
+| `HLTV_CACHE_DIR` | 平台缓存目录 | 存放 profile、浏览器日志、端口记录 |
 | `HLTV_PROXY` | 空 | 出口代理，形如 `http://user:pass@host:port` 或 `socks5://host:port`。**遇到 IP 级封锁时的主要解法** |
 | `HLTV_MIN_INTERVAL` | `3.0` | 两次请求的最小间隔（秒） |
 | `HLTV_JITTER` | `0.8` | 间隔上的随机抖动上限（秒） |
 | `HLTV_TIMEOUT` | `40` | 单次请求超时（秒） |
 | `HLTV_MAX_RETRIES` | `3` | 失败重试次数 |
-| `HLTV_IMPERSONATE` | `safari17_0` | TLS 指纹，可选 `chrome131`、`firefox135` 等 |
+| `HLTV_NAV_RETRIES` | `3` | 页面导航重试次数（浏览器后端） |
+| `HLTV_IMPERSONATE` | `safari17_0` | HTTP 后端的 TLS 指纹，可选 `chrome131`、`firefox135` 等 |
 
 也识别标准的 `HTTPS_PROXY` / `ALL_PROXY`。
 
 ## 诊断与测试
 
 ```bash
-python scripts/health.py              # 连通性诊断：区分 IP 级 / 路径级封锁
+python scripts/browser_check.py       # 默认后端：浏览器能否连接、能否取到 HLTV
+python scripts/health.py              # HTTP 后端：区分 IP 级 / 路径级封锁
 python scripts/health.py --json
 python scripts/hltv_inspect.py /matches   # 页面结构 dump，改版时用来定位新选择器
 
-python tests/test_parsers.py          # 离线单元测试，不联网，秒级
-python tests/smoke.py                 # 联网冒烟测试（约 1 分钟）
+python tests/test_parsers.py          # 离线：解析逻辑
+python tests/test_launcher.py         # 离线：后端选择、显示环境判断、CDP 探测
+python tests/smoke.py                 # 联网冒烟（约 1.5 分钟）
 python tests/smoke.py --only ranking player career
 ```
 
-测试分两层是有意的：`test_parsers.py` 用与线上同构的夹具验证解析逻辑，不依赖网络，
-所以当 HLTV 限流或改版时，能立刻分清是**逻辑问题**还是**页面变了**。
+测试分两层是有意的：离线测试用与线上同构的夹具验证逻辑，不依赖网络，所以当 HLTV
+限流或改版时，能立刻分清是**逻辑问题**还是**页面变了** —— 这个区分在本项目的开发过程中
+救过好几次场。
 
 ## 合规声明
 

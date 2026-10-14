@@ -26,7 +26,7 @@ MAX_LIMIT = 100
 server = MCPServer(
     name="hltv",
     title="HLTV.org",
-    version="1.0.0",
+    version="1.1.0",
     instructions=(
         "查询 HLTV.org 的 Counter-Strike 赛事数据：赛程、赛果、世界排名、战队、选手、"
         "新闻与赛事日历。所有工具都接受数字 id 或名称（如 \"Vitality\"、\"ZywOo\"），"
@@ -291,7 +291,6 @@ def hltv_get_player_career(
     description=(
         "获取选手**逐年 Rating 与详细数据**（Rating 3.0/2.0、K/D、ADR、地图数、"
         "对 Top5/10/20 对手的 Rating 等）。这是回答「某选手历年数据怎么样」最直接的接口。"
-        "注意：需要开启浏览器后端（HLTV_BROWSER_CDP），因为 /stats/* 路径会被 Cloudflare 拦截。"
     ),
 )
 def hltv_get_player_year_stats(
@@ -366,13 +365,12 @@ def hltv_get_player_year_stats(
             except HltvError as exc:
                 result["career_total_error"] = str(exc)[:160]
 
-        # 未开浏览器后端时给出明确指引
-        from .client import BROWSER_CDP
-
-        if not BROWSER_CDP:
+        # 未走浏览器后端时给出明确指引
+        if client.backend_in_use != "browser":
             result["warning"] = (
-                "当前使用 HTTP 后端，/stats/* 可能被 Cloudflare 拦截。"
-                "若数据为空或报错，请设置 HLTV_BROWSER_CDP 启用浏览器后端后重试。"
+                f"当前使用 {client.backend_in_use} 后端，/stats/* 会被 Cloudflare 拦截。"
+                "若数据为空或报错，请检查浏览器后端（默认已启用；"
+                "运行 hltv_backend_status 可查看当前状态）。"
             )
 
         return _dump(result)
@@ -500,7 +498,6 @@ def hltv_get_head_to_head(
         "获取单场比赛的**逐地图、分阵营（CT/T）的选手详细数据**："
         "Op.K-D、多杀、KAST、1vX 残局、爆头数、助攻、死亡、ADR、Rating 等。"
         "支持按地图（All/Inferno/Ancient…）与阵营（both/T/CT）筛选。"
-        "需要浏览器后端（HLTV_BROWSER_CDP）：地图与阵营是前端按钮，纯 HTTP 无法切换。"
     ),
 )
 def hltv_get_match_stats(
@@ -517,17 +514,9 @@ def hltv_get_match_stats(
         all_maps: 为 true 时遍历所有地图，返回每张图的数据（较慢）。
 
     BO1/BO3/BO5 均适用 —— 有几张图就有几个可选地图项。
+    该工具必须用浏览器后端：地图切换是前端按钮，纯 HTTP 请求无法触发。
     """
     from .browser import get_browser_fetcher
-    from .client import BROWSER_CDP
-
-    if not BROWSER_CDP:
-        return _dump(
-            {
-                "error": "该工具需要浏览器后端。请设置 HLTV_BROWSER_CDP 后重试"
-                "（例：export HLTV_BROWSER_CDP=http://127.0.0.1:9222）。",
-            }
-        )
 
     try:
         fetcher = get_browser_fetcher()
@@ -637,6 +626,68 @@ def hltv_get_events(limit: int = 30, name: str | None = None) -> str:
         return _dump({"count": len(rows), "events": rows[:_clamp(limit, 30)]})
     except HltvError as exc:
         return _dump({"error": str(exc)})
+
+
+@server.tool(
+    name="hltv_backend_status",
+    description=(
+        "查看当前用哪种方式访问 HLTV（浏览器后端 / HTTP 后端）、浏览器是否可用、"
+        "以及各页面能否正常取到。排查「查不到数据」类问题时先调这个。"
+    ),
+)
+def hltv_backend_status(check_pages: bool = False) -> str:
+    """
+    Args:
+        check_pages: 为 true 时真实访问几个代表性页面验证连通性（较慢，约 10-20 秒）。
+    """
+    from .client import BACKEND, wants_browser
+    from .launcher import AUTOLAUNCH, CACHE_DIR, PROFILE_DIR, find_browser
+
+    client = get_client()
+    info: dict[str, Any] = {
+        "configured_backend": BACKEND,
+        "backend_in_use": client.backend_in_use,
+        "autolaunch": AUTOLAUNCH,
+        "profile_dir": str(PROFILE_DIR),
+        "log_file": str(CACHE_DIR / "chrome.log"),
+    }
+
+    if wants_browser():
+        try:
+            binary = find_browser()
+            info["browser_binary"] = binary or "(未找到)"
+        except HltvError as exc:
+            info["browser_binary"] = f"(错误) {exc}"
+            binary = None
+        if binary:
+            try:
+                from .browser import get_browser_fetcher
+
+                probe = get_browser_fetcher().probe()
+                info["browser_connected"] = True
+                info["browser_version"] = probe.get("browser_version")
+                info["cdp_url"] = probe.get("cdp_url")
+                info["autolaunched"] = probe.get("autolaunched")
+                info["homepage_challenged"] = probe.get("challenged")
+            except HltvError as exc:
+                info["browser_connected"] = False
+                info["browser_error"] = str(exc)[:300]
+
+    if check_pages:
+        checks: list[dict[str, Any]] = []
+        for label, path in [
+            ("赛程", "/matches"),
+            ("选手资料", "/player/11816/ropz"),
+            ("选手逐年统计", "/stats/players/11816/ropz"),
+        ]:
+            try:
+                size = len(client.fetch_html(path))
+                checks.append({"page": label, "ok": True, "bytes": size})
+            except HltvError as exc:
+                checks.append({"page": label, "ok": False, "error": str(exc)[:200]})
+        info["page_checks"] = checks
+
+    return _dump(info)
 
 
 def main() -> None:

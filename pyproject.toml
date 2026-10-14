@@ -1,21 +1,25 @@
 [project]
 name = "hltv-mcp"
-version = "1.0.0"
+version = "1.1.0"
 description = "HLTV.org MCP —— 让 AI 直接查询 CS 赛程、赛果、排名、战队、选手与新闻"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [
     "mcp>=2.0",
+    # 默认后端是真实浏览器，playwright 用于通过 CDP 驱动它
+    # 注意：不需要 `playwright install`，本服务复用本机已有的 Chrome
+    "playwright>=1.40",
+    # HTTP 后端的 TLS 指纹伪装（HLTV_BACKEND=http 时使用）
     "curl_cffi>=0.7",
     "beautifulsoup4>=4.12",
     "lxml>=5.0",
 ]
 
 [project.optional-dependencies]
-# 浏览器后端：借用用户自己的 Chrome，用于出口 IP 被拦或需要访问 /stats/*
-# 安装：pip install -e ".[browser]"
-browser = ["playwright>=1.40"]
+# HTTP-only 部署：不想装 playwright 时用，配合 HLTV_BACKEND=http
+# 安装：pip install -e ".[http]" 然后设置 HLTV_BACKEND=http
+http = ["curl_cffi>=0.7"]
 
 [project.scripts]
 hltv-mcp = "hltv_mcp.server:main"

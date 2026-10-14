@@ -1,11 +1,21 @@
-"""HLTV HTTP 客户端。
+"""HLTV 抓取客户端（后端可切换）。
 
-HLTV 站点位于 Cloudflare 之后。裸 `requests` / `curl` 会拿到 403 的
-"Just a moment..." 挑战页；实测 **Safari 的 TLS 指纹可以通过**，而 Chrome
-指纹会被拦。因此这里用 `curl_cffi` 的 `impersonate="safari17_0"`。
+两种取页面的方式
+----------------
+**浏览器后端（默认）** —— 用真实浏览器取页面，见 `browser.py` 与 `launcher.py`。
+它是最接近真实用户的方式，因此穿过 Cloudflare 最稳；并且只有它能做点击交互
+（`hltv_get_match_stats` 依赖这一点）。代价是慢一些、需要一个本机浏览器。
+
+**HTTP 后端** —— `curl_cffi` 直接请求，用 Safari 的 TLS 指纹。裸 `requests` /
+`curl` 会拿到 403 的 "Just a moment..." 挑战页，而实测 Safari 指纹能过、Chrome
+指纹会被拦。它快、轻、无需浏览器，适合浏览器装不起来的场景。
+
+`HLTV_BACKEND` 控制选择：`auto`（默认）/ `browser` / `http`。
+`auto` 的含义是**优先浏览器**，只有在浏览器根本起不来时才降级到 HTTP ——
+「页面被 Cloudflare 拦」不属于这种，那种情况降级只会拿到同样的拦截页。
 
 客户端负责四件事：
-  1. 会话预热（先取首页拿 cf_clearance 一类 cookie）
+  1. 后端选择与降级
   2. 全局限速（HLTV 对高频请求敏感）
   3. TTL 缓存（同一会话内避免重复抓取）
   4. 失败重试 + 会话重建
@@ -66,15 +76,33 @@ def _proxy_from_env() -> dict[str, str] | None:
 PROXY = _proxy_from_env()
 
 # 后端选择：
-#   默认        —— curl_cffi 直接 HTTP，快、轻，绝大多数情况够用
-#   CDP 浏览器   —— 借用用户自己的 Chrome，用于出口 IP 被拦、或需要访问
-#                  /stats/* 这类有单独规则的路径
-# 设了 HLTV_BROWSER_CDP 就切到浏览器后端。
+#   auto（默认）—— 优先浏览器；只有浏览器**根本起不来**时才降级到 HTTP。
+#                   页面被 Cloudflare 拦不算「起不来」，那种情况降级没意义。
+#   browser     —— 强制浏览器。起不来就报错，不做任何降级。
+#   http        —— 强制 HTTP。适合装不了浏览器的环境（CI、容器）。
+BACKEND = os.environ.get("HLTV_BACKEND", "auto").strip().lower()
+if BACKEND not in ("auto", "browser", "http"):
+    BACKEND = "auto"
+
+# 显式指定 CDP 地址（复用外部已开着的浏览器）。留空则由 launcher 自动准备。
 BROWSER_CDP = os.environ.get("HLTV_BROWSER_CDP", "").strip()
+
+
+def wants_browser() -> bool:
+    """当前配置是否要走浏览器后端。"""
+    return BACKEND in ("auto", "browser")
 
 
 class HltvError(RuntimeError):
     """HLTV 请求失败（网络、拦截或页面不存在）。"""
+
+
+class BrowserUnavailable(HltvError):
+    """浏览器后端起不来（没装浏览器、连不上调试端口等）。
+
+    单独一个类型，是为了让 `auto` 能准确区分「该降级」和「不该降级」：
+    只有这种错误才退到 HTTP。
+    """
 
 
 @dataclass
@@ -114,6 +142,9 @@ class HltvClient:
         self._last_request_at = 0.0
         self._cache: dict[str, _CacheEntry] = {}
         self._warmed_up = False
+        # 记录实际生效的后端，供工具回传与诊断脚本读取
+        self._backend_in_use: str | None = None
+        self._fallback_noted = False
 
     # ---------- 会话管理 ----------
 
@@ -199,28 +230,68 @@ class HltvClient:
     def fetch_html(self, path: str, *, bypass_cache: bool = False) -> str:
         """抓取一个 HLTV 路径，返回 HTML 字符串。
 
-        配了 HLTV_BROWSER_CDP 时走浏览器后端，否则走 curl_cffi。
+        后端按 `HLTV_BACKEND` 选择（默认 `auto` = 优先浏览器）。
+        缓存键带上实际使用的后端，避免降级前后拿到混在一起的结果。
         """
-        cache_key = ("browser:" if BROWSER_CDP else "") + path
+        use_browser = self._should_use_browser()
+        cache_key = ("browser:" if use_browser else "") + path
         if not bypass_cache:
             cached = self._cache_get(cache_key)
             if cached is not None:
                 return cached
 
-        if BROWSER_CDP:
-            html = self._fetch_via_browser(path)
-            self._cache_put(cache_key, html, self._cache_bucket(path))
-            return html
+        if not use_browser:
+            return self._fetch_via_http(path, cache_key)
 
-        return self._fetch_via_http(path, cache_key)
+        try:
+            html = self._fetch_via_browser(path)
+        except BrowserUnavailable as exc:
+            # 只有「浏览器起不来」才降级。页面被 Cloudflare 拦不属于这一类 ——
+            # 那种情况 HTTP 后端会拿到同样的拦截，降级只是把错误变得难以理解。
+            if BACKEND != "auto":
+                raise
+            self._note_fallback(exc)
+            self._backend_in_use = "http"
+            return self._fetch_via_http(path, cache_key)
+
+        self._backend_in_use = "browser"
+        self._cache_put(cache_key, html, self._cache_bucket(path))
+        return html
+
+    def _should_use_browser(self) -> bool:
+        """是否该走浏览器。一旦判定过就不再反复探测。"""
+        if not wants_browser():
+            self._backend_in_use = "http"
+            return False
+        if self._backend_in_use == "http":
+            # auto 模式下已经确认浏览器不可用，后续请求不再重试，避免每次都白等一次启动超时
+            return False
+        return True
+
+    def _note_fallback(self, exc: Exception) -> None:
+        """降级只提示一次，避免把日志刷满。"""
+        if self._fallback_noted:
+            return
+        self._fallback_noted = True
+        import sys
+
+        print(
+            f"[hltv-mcp] 浏览器后端不可用，已降级为 HTTP：{exc}",
+            file=sys.stderr,
+        )
+
+    @property
+    def backend_in_use(self) -> str:
+        """当前实际在用的后端：`browser` / `http`。"""
+        return self._backend_in_use or ("browser" if wants_browser() else "http")
 
     def _fetch_via_browser(self, path: str) -> str:
-        """浏览器后端。延迟导入，避免没装 playwright 时影响默认路径。"""
+        """浏览器后端。延迟导入，避免没装 playwright 时影响 HTTP 路径。"""
         from .browser import get_browser_fetcher
 
         with self._lock:
             self._throttle()
-        return get_browser_fetcher().fetch_html(path)
+            return get_browser_fetcher().fetch_html(path)
 
     def _fetch_via_http(self, path: str, cache_key: str) -> str:
         last_error: Exception | None = None

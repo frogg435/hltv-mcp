@@ -90,7 +90,7 @@ python3 -m venv .venv
 | `hltv_search` | 搜索选手/战队/赛事/新闻，名称 → ID |
 | `hltv_get_matches` | 赛程（即将开始 + 进行中），支持按队伍/赛事过滤、只看直播 |
 | `hltv_get_results` | 赛果，含比分与胜方，支持分页 |
-| `hltv_get_match` | 单场详情：地图比分、双方选手数据 |
+| `hltv_get_match` | 单场详情：地图比分 + **逐地图分队伍的选手数据**（昵称、选手 ID、国籍、K-D、ADR、KAST、Rating、Swing）|
 | `hltv_get_team_ranking` | 世界战队排名（含积分） |
 | `hltv_get_team` | 战队资料：排名、教练、阵容 |
 | `hltv_get_player` | 选手资料：Rating 3.0、能力评分、生涯荣誉汇总 |

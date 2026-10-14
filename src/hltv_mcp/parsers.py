@@ -201,18 +201,111 @@ def parse_match_detail(soup: BeautifulSoup) -> dict[str, Any]:
     detail["format"] = _clean_text(soup.select_one(".match-info-box .padding div:nth-child(3)"))
 
     # 双方选手表现
-    for idx, side in enumerate(("team1", "team2"), start=1):
-        players: list[dict[str, Any]] = []
-        for row in soup.select(f".stats-content .team{idx}-table tbody tr, .stats-content table tbody tr"):
-            name = _clean_text(row.select_one(".player-nick, td:nth-child(1)"))
-            if not name:
-                continue
-            cells = [_clean_text(td) for td in row.select("td")]
-            players.append({"name": name, "cells": [c for c in cells if c]})
-        if players:
-            detail[f"{side}_players"] = players[:10]
+    #
+    # 此前这里写的是 `select(".stats-content .team1-table tbody tr, .stats-content table tbody tr")`
+    # —— CSS 里逗号是「或」，第二个选择器会把**两支队伍的行一起选中**，于是
+    # team1_players 和 team2_players 拿到完全相同的数据，还把表头也当成选手。
+    # 改为交给 parse_match_page_stats 按「表格 → 队伍」正确分组。
+    map_names = ["All maps"] + [m["map"] for m in maps if m.get("map")]
+    player_stats = parse_match_page_stats(soup, map_names)
+    if player_stats:
+        detail["player_stats"] = player_stats
+
+    # 向后兼容：这两项取「全部地图」合计里的两队
+    all_maps = player_stats.get("All maps") or []
+    if len(all_maps) > 0:
+        detail["team1_players"] = all_maps[0]["players"]
+    if len(all_maps) > 1:
+        detail["team2_players"] = all_maps[1]["players"]
 
     return detail
+
+
+# --------------------------- 比赛页面：逐地图选手数据 ---------------------------
+#
+# 注意：比赛页面（/matches/{id}）的统计表类名与统计页（/stats/matches/{id}）**不同**：
+#   比赛页面    td.players / td.kd / td.adr / td.kast / td.rating / td.roundSwing
+#   统计页      td.st-player / td.st-opkd / td.st-adr / ...
+# 所以两边不能共用一套字段映射。
+_MATCH_PAGE_FIELDS = {
+    "kd": "kd",
+    "adr": "adr",
+    "kast": "kast",
+    "rating": "rating",
+    "roundswing": "round_swing",
+    "openingkd": "opening_kd",
+    "mks": "multi_kills",
+    "clutches": "clutches_1vx",
+}
+
+
+def parse_match_page_stats(
+    soup: BeautifulSoup, map_names: list[str] | None = None
+) -> dict[str, list[dict[str, Any]]]:
+    """解析比赛页面里的 `.stats-content` 区块，按地图 × 队伍返回选手数据。
+
+    结构要点（实测）：
+      · 每个 `.stats-content` 对应一张地图，**第一个是「全部地图」合计**，
+        其余按 `map_names` 的顺序对应。
+      · 每个区块里每支队伍有一张 `table.table.totalstats`（合计），
+        另有 `.ctstats` / `.tstats` 各一张且带 `hidden` 类 —— 概览只看合计。
+      · 队名在该表首行 `img.logo` 的 `alt`。
+      · 选手昵称在 `td.players span.player-nick`（**不是**整格的文本，
+        整格文本是「真名 ' 昵称 ' 姓氏」那种混合形式）。
+      · 数值列各有 traditional-data 与 eco-adjusted-data 两份，取前者。
+    """
+    names = list(map_names or [])
+    result: dict[str, list[dict[str, Any]]] = {}
+
+    for index, block in enumerate(soup.select(".stats-content")):
+        label = names[index] if index < len(names) else f"第{index}区块"
+        teams: list[dict[str, Any]] = []
+
+        for table in block.select("table.table"):
+            classes = [c.lower() for c in (table.get("class") or [])]
+            if "totalstats" not in classes:
+                continue  # ctstats / tstats：分阵营的隐藏表，概览不需要
+
+            logo = table.select_one("img.logo")
+            team_name = (logo.get("alt") or logo.get("title")) if logo else None
+
+            players: list[dict[str, Any]] = []
+            # 用 table 下所有的 tr 而不是 `tbody tr`：浏览器会把裸的 tr 包进
+            # 自动生成的 tbody，但直接解析服务端 HTML 时没有这一层。表头行靠
+            # 「有没有 span.player-nick」来排除，两种结构都能正确处理。
+            for row in table.select("tr"):
+                # 用「有昵称元素」来判断是不是选手行 —— 表头行没有，能被自然排除
+                nick_node = row.select_one("span.player-nick")
+                if nick_node is None:
+                    continue
+
+                record: dict[str, Any] = {"nickname": _clean_text(nick_node)}
+
+                link = row.select_one("td.players a[href^='/player/']")
+                if link is not None:
+                    record["player_id"] = _id_from_href(link.get("href"))
+                flag = row.select_one("td.players img.flag")
+                if flag is not None:
+                    record["country"] = flag.get("title") or flag.get("alt")
+
+                for td in row.find_all("td"):
+                    td_classes = [c.lower() for c in (td.get("class") or [])]
+                    if "eco-adjusted-data" in td_classes:
+                        continue  # 经济调整版，跳过
+                    for cls in td_classes:
+                        key = _MATCH_PAGE_FIELDS.get(cls)
+                        if key and key not in record:
+                            record[key] = _clean_text(td)
+
+                players.append(record)
+
+            if players:
+                teams.append({"team": team_name, "players": players})
+
+        if teams:
+            result[label] = teams
+
+    return result
 
 
 # --------------------------- 排位 ---------------------------

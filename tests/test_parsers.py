@@ -229,6 +229,60 @@ MATCH_STATS_FIXTURE = """
 """
 
 
+# ---- 比赛页面（/matches/{id}）的统计表 ----
+# 这个页面与统计页的类名不同：td.players / td.kd / td.adr（统计页是 td.st-*）。
+# 曾经因为选择器写成 A, B（逗号=或）导致两队数据完全重复，这组夹具专门锁住它。
+MATCH_PAGE_FIXTURE = """
+<!-- 一个 .stats-content = 一张地图；里面每支队伍各一张 totalstats，
+     另有 hidden 的 ctstats / tstats（应被忽略） -->
+<div class="stats-content">
+  <table class="table totalstats">
+    <tr><td class="players"><img class="logo" alt="Alpha"/></td>
+        <td>K-D</td><td>eK-eD</td><td>Swing</td><td>ADR</td><td>eADR</td>
+        <td>KAST</td><td>eKAST</td><td>Rating 3.0</td></tr>
+    <tr><td class="players"><img class="flag" title="Sweden"/>
+          <a href="/player/111/aaa"><span class="player-nick">AAA</span></a></td>
+        <td class="kd traditional-data">20-10</td>
+        <td class="kd eco-adjusted-data hidden">21-11</td>
+        <td class="roundSwing">+5.00%</td>
+        <td class="adr traditional-data">90.5</td>
+        <td class="adr eco-adjusted-data hidden">91.5</td>
+        <td class="kast traditional-data">75.0%</td>
+        <td class="kast eco-adjusted-data hidden">76.0%</td>
+        <td class="rating">1.40</td></tr>
+    <tr><td class="players"><img class="flag" title="Denmark"/>
+          <a href="/player/222/bbb"><span class="player-nick">BBB</span></a></td>
+        <td class="kd traditional-data">12-15</td>
+        <td class="kd eco-adjusted-data hidden">12-16</td>
+        <td class="roundSwing">-2.00%</td>
+        <td class="adr traditional-data">60.1</td>
+        <td class="adr eco-adjusted-data hidden">61.1</td>
+        <td class="kast traditional-data">55.0%</td>
+        <td class="kast eco-adjusted-data hidden">56.0%</td>
+        <td class="rating">0.80</td></tr>
+  </table>
+  <table class="table ctstats hidden"><tr><td class="players">(CT)</td></tr></table>
+  <table class="table tstats hidden"><tr><td class="players">(T)</td></tr></table>
+  <table class="table totalstats">
+    <tr><td class="players"><img class="logo" alt="Beta"/></td><td>K-D</td><td>ADR</td></tr>
+    <tbody>
+    <tr><td class="players"><a href="/player/333/ccc"><span class="player-nick">CCC</span></a></td>
+        <td class="kd traditional-data">30-8</td>
+        <td class="adr traditional-data">110.0</td></tr>
+    </tbody>
+  </table>
+</div>
+<!-- 第二张地图：结构一致，只有一队 -->
+<div class="stats-content">
+  <table class="table totalstats">
+    <tr><td class="players"><img class="logo" alt="Beta"/></td><td>K-D</td></tr>
+    <tr><td class="players"><a href="/player/333/ccc"><span class="player-nick">CCC</span></a></td>
+        <td class="kd traditional-data">13-4</td></tr>
+  </table>
+</div>
+"""
+
+
 def parse(soup):
     return P.parse_player_career(soup)
 
@@ -357,6 +411,41 @@ def main() -> int:
     check("T 阵营独立取值", ms["sides"]["t"][0]["players"][0]["adr"], "124.6")
     only_ct = P.parse_match_stats_html(MATCH_STATS_FIXTURE, sides=["ct"])
     check("可只取指定阵营", sorted(only_ct["sides"].keys()), ["ct"])
+
+    # ---- 比赛页面统计：两队不能混在一起 ----
+    stats = P.parse_match_page_stats(
+        BeautifulSoup(MATCH_PAGE_FIXTURE, "lxml"), ["All maps", "Dust2"]
+    )
+    check("按地图分组", sorted(stats.keys()), ["All maps", "Dust2"])
+
+    alpha_team, beta_team = stats["All maps"]
+    check("第一队队名", alpha_team["team"], "Alpha")
+    check("第二队队名", beta_team["team"], "Beta")
+
+    a_nicks = [p["nickname"] for p in alpha_team["players"]]
+    check("A 队选手", a_nicks, ["AAA", "BBB"])
+    check("选手昵称取自 player-nick，不是全名", "AAA" in a_nicks, True)
+
+    # 这两条是这个 bug 的核心回归点
+    check("两队选手不重复", set(a_nicks) & {"CCC"}, set())
+    check("B 队只有自己的选手", [p["nickname"] for p in beta_team["players"]], ["CCC"])
+
+    first = alpha_team["players"][0]
+    check("取 traditional 而非 eco 的 K-D", first["kd"], "20-10")
+    check("ADR", first["adr"], "90.5")
+    check("KAST", first["kast"], "75.0%")
+    check("Rating", first["rating"], "1.40")
+    check("Swing", first["round_swing"], "+5.00%")
+    check("选手 ID", first["player_id"], 111)
+    check("国籍", first["country"], "Sweden")
+
+    # 表头行不能被当成选手
+    check("表头未被计入", all(p["nickname"] not in ("Alpha", "K-D") for p in alpha_team["players"]), True)
+
+    # 隐藏的阵营表不参与概览
+    check("只用 totalstats，隐藏的阵营表被忽略", len(stats["All maps"]), 2)
+    check("第二张地图独立解析", stats["Dust2"][0]["team"], "Beta")
+    check("第二张地图的选手", [p["nickname"] for p in stats["Dust2"][0]["players"]], ["CCC"])
 
     print()
     if failures:

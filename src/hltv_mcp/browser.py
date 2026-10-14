@@ -8,11 +8,16 @@ HTTP 后端（`curl_cffi`）在两种情况下会失败：
 2. **某些路径有单独的规则** —— 例如 `/stats/*`（选手逐年 Rating 所在页）
 
 这两种情况换 TLS 指纹、上有头浏览器、带登录态都无效，因为判定依据是 IP 与
-浏览器的真实度。真正有效的做法是**用真实浏览器取数据**：住宅出口 IP、真实的
-浏览器配置文件、正常的渲染行为。
+浏览器的真实度。真正有效的做法是**用真实浏览器取数据**。
 
 另外，有些数据**只有**浏览器能拿到：比赛详细统计页的地图切换是前端按钮，
 纯 HTTP 请求无法触发（见 `fetch_match_stats`）。
+
+**绝不打扰用户**
+----------------
+标签页一律以 `background=True` 创建，因此不会抢焦点、不会把你正在看的页面顶掉。
+这不是「尽量」而是硬约束 —— Playwright 的 `new_page()` 一定会激活新标签页，
+所以这里不用它，改用自研的 CDP 客户端（见 `cdp.py`）。
 
 浏览器从哪来
 ------------
@@ -27,10 +32,10 @@ HTTP 后端（`curl_cffi`）在两种情况下会失败：
 
 安全边界
 --------
-* **绝不关闭用户自己的浏览器** —— 只有 `launcher` 主动拉起的实例才会被它关掉；
-  连上外部实例时 CDP 的 browser 对象不会被 `close()`。
-* 不读取、不导出、不落盘用户的 cookie 与登录凭据。
-* 自动拉起的实例使用**独立**的用户数据目录，不碰你日常的 profile。
+* **绝不关闭用户自己的浏览器** —— 只有 `launcher` 主动拉起的实例才会被它关掉
+* 只关自己开的标签页，不动别的标签页
+* 不读取、不导出、不落盘用户的 cookie 与登录凭据
+* 自动拉起的实例使用**独立**的用户数据目录，不碰你日常的 profile
 """
 
 from __future__ import annotations
@@ -39,8 +44,8 @@ import os
 import threading
 import time
 from contextlib import contextmanager
-from typing import Any
 
+from .cdp import CDPError, CDPSession, CDPTab, ws_url_for
 from .client import BrowserUnavailable, HLTV_BASE, HltvError
 
 DEFAULT_CDP_URL = os.environ.get("HLTV_BROWSER_CDP", "")
@@ -55,16 +60,29 @@ CHALLENGE_WAIT = float(os.environ.get("HLTV_CHALLENGE_WAIT", "25"))
 # 页面导航重试次数。实测约十分之一的请求会撞上瞬态 Cloudflare 挑战页，
 # 重开一个标签页重试即可恢复，因此不能只试一次。
 NAV_RETRIES = int(os.environ.get("HLTV_NAV_RETRIES", "3"))
-PAGE_TIMEOUT = int(os.environ.get("HLTV_PAGE_TIMEOUT", "45000"))
+PAGE_TIMEOUT = int(os.environ.get("HLTV_PAGE_TIMEOUT", "45"))
 
 
-def _safe_close(page) -> None:
-    """关闭标签页，失败也无所谓 —— 绝不能因为清理动作影响主流程。"""
-    try:
-        if page is not None and not page.is_closed():
-            page.close()
-    except Exception:  # noqa: BLE001
-        pass
+def _looks_like_challenge(title: str, html: str) -> bool:
+    if any(marker.lower() in (title or "").lower() for marker in _CHALLENGE_MARKERS):
+        return True
+    head = html[:4000]
+    return "cf-chl" in head or "Just a moment" in head
+
+
+def _looks_suspicious(title: str, html: str) -> bool:
+    """既不是正常页面，也不像标准的挑战页。
+
+    实测偶发过：`/matches` 返回 25KB 的中间页（正常是 1.1MB），标题也不对，
+    既不触发挑战页特征、也不是错误码，解析出来就是「0 场比赛」——静默给错结果。
+    HLTV 的正常页面标题里一定带 "HLTV"，据此识别。
+
+    只用来**多试一次**，不作为失败依据：万一哪天站点改了标题格式，
+    顶多多重试一轮，不会整个失效。
+    """
+    if "HLTV" in (title or ""):
+        return False
+    return True
 
 
 def _is_autolaunched() -> bool:
@@ -77,23 +95,18 @@ def _is_autolaunched() -> bool:
         return False
 
 
-def _looks_like_challenge(title: str, html: str) -> bool:
-    if any(marker.lower() in (title or "").lower() for marker in _CHALLENGE_MARKERS):
-        return True
-    head = html[:4000]
-    return "cf-chl" in head or "Just a moment" in head
-
-
 class BrowserFetcher:
     """通过 CDP 用真实浏览器抓取页面。"""
 
     def __init__(self, cdp_url: str | None = None) -> None:
         # 不在这里解析地址 —— 解析可能意味着启动浏览器，很慢。
-        # 留到第一次真正要取页面时再做，避免「只查缓存」的请求也被拖慢。
+        # 留到第一次真正要取页面时再做。
         self._explicit_url = (cdp_url or DEFAULT_CDP_URL).strip()
-        # 浏览器操作必须在同一线程使用，且并发开着多个标签页没有意义，这里串行化
+        self._session: CDPSession | None = None
+        # CDP 连接不能跨线程并发使用，且并发开多个标签页没有意义，这里串行化
         self._lock = threading.RLock()
 
+    # ------------------------------------------------------------------
     @property
     def cdp_url(self) -> str:
         """解析出一个可用的 CDP 地址，必要时拉起浏览器。"""
@@ -103,97 +116,115 @@ class BrowserFetcher:
 
         return get_launcher().ensure()
 
-    # ------------------------------------------------------------------
-    def _connect(self, cdp_url: str):
-        """连接 CDP。延迟导入 playwright，未装也能给出清楚的提示。"""
+    def _connect(self, cdp_base: str) -> CDPSession:
+        """连上 CDP，失败时给出可操作的提示。"""
+        if self._session is not None:
+            return self._session
         try:
-            from playwright.sync_api import sync_playwright
-        except ImportError as exc:  # noqa: BLE001
+            self._session = CDPSession(ws_url_for(cdp_base))
+        except CDPError as exc:
             raise BrowserUnavailable(
-                "未安装 playwright，浏览器后端不可用。"
-                "安装：pip install playwright（无需再跑 playwright install，"
-                "本后端复用本机已有的 Chrome）。"
-                "或改用 HTTP 后端：设置 HLTV_BACKEND=http。"
+                f"无法连接浏览器（{cdp_base}）：{exc}。"
+                "请确认该地址上有一个带 --remote-debugging-port 的浏览器实例，"
+                "或清空 HLTV_BROWSER_CDP 让本服务自动启动一个。"
             ) from exc
-        return sync_playwright
+        return self._session
 
+    def _drop_session(self) -> None:
+        if self._session is not None:
+            self._session.close()
+            self._session = None
+
+    # ------------------------------------------------------------------
     def fetch_html(self, path: str) -> str:
-        """打开一个临时标签页抓取页面，然后关掉它。"""
-        with self.page(path) as page:
-            return page.content()
+        """抓一个页面并返回 HTML。标签页在后台打开，不影响用户正在看的页面。"""
+        tab, html = self.open(path)
+        tab.close()
+        return html
+
+    def open(self, path: str, *, wait_after: float = 0.0) -> tuple[CDPTab, str]:
+        """打开页面（含重试），返回 (标签页, HTML)。
+
+        标签页始终在**后台**创建 —— 不抢焦点，用户当前的页面不受影响。
+        调用方用完必须 `tab.close()`（用 `page()` 更省心）。
+        """
+        url = path if path.startswith("http") else HLTV_BASE + path
+        cdp_base = self.cdp_url
+        last_error: Exception | None = None
+
+        for attempt in range(NAV_RETRIES):
+            session = self._connect(cdp_base)
+            tab: CDPTab | None = None
+            try:
+                tab = session.new_page("about:blank", background=True)
+                tab.navigate(url)
+                tab.wait_for_load(timeout=PAGE_TIMEOUT)
+                if wait_after:
+                    tab.wait(wait_after)
+
+                # 关键：挑战通常几秒内会自己通过，先等一等再判定。
+                # 少了这一步会把「正在通过验证」误判成「被拦」，白白重试三次。
+                if self._await_challenge(tab):
+                    # 实测约十分之一的请求会撞上瞬态挑战页，重开即可恢复
+                    last_error = HltvError(f"停留在 Cloudflare 挑战页：{path}")
+                    tab.close()
+                    # 挑战失败后的实例往往已经半残，重连一次更干净
+                    self._drop_session()
+                    time.sleep(2.0 * (attempt + 1))
+                    continue
+
+                # 挑战通过后页面已重渲染，内容要重新取
+                html = tab.content()
+
+                # 拿到的东西不像 HLTV 页面（偶发的中间页），再试一次。
+                # 最后一次无论如何都接受 —— 见 _looks_suspicious 的说明。
+                if attempt < NAV_RETRIES - 1 and _looks_suspicious(tab.title(), html):
+                    last_error = HltvError(
+                        f"响应不像 HLTV 页面（{len(html)}B，标题 {tab.title()[:40]!r}）"
+                    )
+                    tab.close()
+                    self._drop_session()
+                    time.sleep(1.5)
+                    continue
+
+                return tab, html
+            except CDPError as exc:
+                last_error = exc
+                if tab is not None:
+                    tab.close()
+                # 连接级错误必须重连，否则后续调用会一直挂在坏连接上
+                self._drop_session()
+                time.sleep(2.0 * (attempt + 1))
+                continue
+
+        raise HltvError(
+            f"浏览器打开页面失败（重试 {NAV_RETRIES} 次）：{path}｜{last_error}。"
+            "若一直在挑战页，请在浏览器里手动打开一次 hltv.org 通过验证。"
+        )
 
     @contextmanager
-    def page(self, path: str, wait_until: str = "domcontentloaded"):
-        """打开页面并把 Playwright 的 page 交给调用方，退出时自动关闭标签页。
+    def page(self, path: str, *, wait_after: float = 0.0):
+        """打开页面并把标签页交给调用方，退出时自动关闭。
 
         需要点击、等待渲染这类交互的工具用它 —— 例如比赛详细统计要切换
         「地图」按钮，纯 HTTP 请求做不到。
         """
-        url = path if path.startswith("http") else HLTV_BASE + path
-        cdp_url = self.cdp_url  # 可能触发浏览器启动，放在锁外做的话会并发启动
-        sync_playwright = self._connect(cdp_url)
+        tab, _html = self.open(path, wait_after=wait_after)
+        try:
+            yield tab
+        finally:
+            tab.close()
 
-        with self._lock:
-            with sync_playwright() as playwright:
-                try:
-                    browser = playwright.chromium.connect_over_cdp(cdp_url)
-                except Exception as exc:  # noqa: BLE001
-                    raise BrowserUnavailable(
-                        f"无法连接浏览器（{cdp_url}）：{exc}。"
-                        "请确认该地址上有一个带 --remote-debugging-port 的浏览器实例，"
-                        "或清空 HLTV_BROWSER_CDP 让本服务自动启动一个。"
-                    ) from exc
-
-                # 优先复用默认上下文 —— 它带着真实 profile 的 cookie 与登录态。
-                # 实测匿名上下文（new_context）更容易被 Cloudflare 拦。
-                contexts = browser.contexts
-                context = contexts[0] if contexts else browser.new_context()
-
-                # 先把页面开出来（可能重试），再把控制权交给调用方。
-                # 两段分开是有意的：调用方在使用过程中抛出的异常必须原样上抛，
-                # 不能被这里的重试逻辑误当成「导航失败」而重来一遍。
-                page = None
-                last_error: Exception | None = None
-                for attempt in range(NAV_RETRIES):
-                    candidate = context.new_page()
-                    try:
-                        candidate.goto(url, wait_until=wait_until, timeout=PAGE_TIMEOUT)
-                        if self._await_challenge(candidate):
-                            # 实测约十分之一的请求会撞上瞬态挑战页，重开即可恢复
-                            last_error = HltvError(f"停留在 Cloudflare 挑战页：{path}")
-                            _safe_close(candidate)
-                            time.sleep(2.0 * (attempt + 1))
-                            continue
-                    except Exception as exc:  # noqa: BLE001 - 导航超时等
-                        last_error = exc
-                        _safe_close(candidate)
-                        time.sleep(2.0 * (attempt + 1))
-                        continue
-
-                    page = candidate
-                    break
-
-                if page is None:
-                    raise HltvError(
-                        f"浏览器打开页面失败（重试 {NAV_RETRIES} 次）：{path}｜{last_error}。"
-                        "若一直在挑战页，请在浏览器里手动打开一次 hltv.org 通过验证。"
-                    )
-
-                try:
-                    yield page
-                finally:
-                    # 只关自己开的标签页；绝不 close browser，那是用户的 Chrome
-                    _safe_close(page)
-
+    # ------------------------------------------------------------------
     @staticmethod
-    def _await_challenge(page) -> bool:
+    def _await_challenge(tab: CDPTab) -> bool:
         """等 Cloudflare 挑战自动通过。返回 True 表示仍停在挑战页。"""
         deadline = time.monotonic() + CHALLENGE_WAIT
-        html = page.content()
-        while _looks_like_challenge(page.title(), html) and time.monotonic() < deadline:
-            page.wait_for_timeout(1200)
-            html = page.content()
-        return _looks_like_challenge(page.title(), html)
+        html = tab.content()
+        while _looks_like_challenge(tab.title(), html) and time.monotonic() < deadline:
+            tab.wait(1.2)
+            html = tab.content()
+        return _looks_like_challenge(tab.title(), html)
 
     # ------------------------------------------------------------------
     def fetch_match_stats(
@@ -201,7 +232,7 @@ class BrowserFetcher:
         match_id: int,
         slug: str = "x",
         map_name: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> dict:
         """取某场比赛的详细统计页（可按地图筛选）。
 
         这个页面特殊：地图是**前端按钮**，URL 参数无效
@@ -214,36 +245,41 @@ class BrowserFetcher:
         Returns:
             {"stats_url", "available_maps", "map", "html"}
         """
-        # 步骤一：比赛页里的 "Detailed stats" 指向另一套 ID，必须先取出来
+        # 步骤一：比赛页里的 "Detailed stats" 指向另一套 ID，必须先取出来。
+        #
+        # 注意页面上有**多个**这类链接，且含义不同：
+        #   /stats/matches/mapstatsid/241574/...   ← 单张地图的统计
+        #   /stats/matches/131941/...              ← 整场比赛的统计（要的是这个）
+        # 实测直接取第一个会拿到 mapstatsid 形式，那样地图切换器虽有，但语义上被
+        # 限定在某一张图上。所以优先挑不含 mapstatsid 的那个。
         stats_href = None
-        with self.page(f"/matches/{int(match_id)}/{slug}") as page:
-            link = page.query_selector("a[href^='/stats/matches/']")
-            if link is not None:
-                stats_href = link.get_attribute("href")
+        with self.page(f"/matches/{int(match_id)}/{slug}") as tab:
+            stats_href = tab.evaluate(
+                """
+                (() => {
+                  const links = [...document.querySelectorAll("a[href^='/stats/matches/']")]
+                      .map(a => a.getAttribute('href'));
+                  return links.find(h => !h.includes('mapstatsid')) || links[0] || null;
+                })()
+                """
+            )
         if not stats_href:
             raise HltvError(
                 f"比赛 {match_id} 没有详细统计页（比赛可能尚未开始，或数据未生成）。"
             )
 
-        # 步骤二：打开统计页，选地图，再读渲染结果
-        with self.page(stats_href, wait_until="load") as page:
-            page.wait_for_timeout(4000)
-
-            available_maps = page.evaluate(
-                """()=>[...document.querySelectorAll('.stats-match-map')].map(
-                    e=>e.innerText.replace(/\\s+/g,' ').trim()).slice(0,20)"""
-            )
+        # 步骤二：打开统计页，点地图，再读渲染结果
+        with self.page(stats_href, wait_after=3.5) as tab:
+            available_maps = [text for text in tab.texts(".stats-match-map") if text]
 
             if map_name and map_name.lower() != "all":
-                try:
-                    page.locator(".stats-match-map", has_text=map_name).first.click(timeout=8000)
-                    page.wait_for_timeout(3500)
-                except Exception as exc:  # noqa: BLE001
+                if not tab.click_by_text(".stats-match-map", map_name):
                     raise HltvError(
                         f"找不到地图 {map_name!r}。本场比赛可选：{available_maps}"
-                    ) from exc
+                    )
+                tab.wait(3.0)
 
-            html = page.content()
+            html = tab.content()
 
         return {
             "stats_url": HLTV_BASE + stats_href if stats_href.startswith("/") else stats_href,
@@ -253,34 +289,33 @@ class BrowserFetcher:
         }
 
     # ------------------------------------------------------------------
-    def probe(self) -> dict[str, Any]:
+    def probe(self) -> dict:
         """连通性自检，供 scripts/browser_check.py 使用。"""
-        info: dict[str, Any] = {}
-        # 先解析地址（可能触发自动启动），再连
-        cdp_url = self.cdp_url
-        info["cdp_url"] = cdp_url
-        info["autolaunched"] = _is_autolaunched()
-        sync_playwright = self._connect(cdp_url)
-        with self._lock:
-            with sync_playwright() as playwright:
-                try:
-                    browser = playwright.chromium.connect_over_cdp(cdp_url)
-                except Exception as exc:  # noqa: BLE001
-                    raise BrowserUnavailable(
-                        f"无法连接浏览器（{cdp_url}）：{exc}"
-                    ) from exc
-                info["browser_version"] = browser.version
-                info["contexts"] = len(browser.contexts)
-                context = browser.contexts[0] if browser.contexts else browser.new_context()
-                page = context.new_page()
-                try:
-                    page.goto(HLTV_BASE + "/", wait_until="domcontentloaded", timeout=PAGE_TIMEOUT)
-                    info["title"] = page.title()
-                    info["challenged"] = self._await_challenge(page)
-                    info["html_size"] = len(page.content())
-                finally:
-                    _safe_close(page)
+        cdp_base = self.cdp_url
+        info: dict = {
+            "cdp_url": cdp_base,
+            "autolaunched": _is_autolaunched(),
+            "browser_connected": True,
+        }
+        session = self._connect(cdp_base)
+        try:
+            info["browser_version"] = session.version()
+        except CDPError:
+            info["browser_version"] = None
+
+        tab = session.new_page("about:blank", background=True)
+        try:
+            tab.navigate(HLTV_BASE + "/")
+            tab.wait_for_load(timeout=PAGE_TIMEOUT)
+            info["title"] = tab.title()
+            info["challenged"] = self._await_challenge(tab)
+            info["html_size"] = len(tab.content())
+        finally:
+            tab.close()
         return info
+
+    def close(self) -> None:
+        self._drop_session()
 
 
 _fetcher: BrowserFetcher | None = None

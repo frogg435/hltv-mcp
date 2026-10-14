@@ -26,7 +26,7 @@ MAX_LIMIT = 100
 server = MCPServer(
     name="hltv",
     title="HLTV.org",
-    version="1.1.0",
+    version="1.2.0",
     instructions=(
         "查询 HLTV.org 的 Counter-Strike 赛事数据：赛程、赛果、世界排名、战队、选手、"
         "新闻与赛事日历。所有工具都接受数字 id 或名称（如 \"Vitality\"、\"ZywOo\"），"

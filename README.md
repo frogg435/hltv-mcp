@@ -2,8 +2,8 @@
 
 让 AI 直接查询 **HLTV.org** 的 Counter-Strike 赛事数据 —— 赛程、赛果、世界排名、战队、选手、新闻、赛事日历。
 
-默认用**真实浏览器**取数据（自动启动、无需配置），因此能稳定穿过 Cloudflare，并且是唯一
-能拿到「单场比赛逐地图 / 分阵营选手数据」这类交互式内容的入口。
+默认用**真实浏览器**取数据：**后台运行、界面上完全看不见**，也不会打扰你正在浏览的页面。
+支持 Windows / macOS / Linux，以及 **Android Termux**。
 
 ## 它能回答什么
 
@@ -34,11 +34,13 @@ python3 -m venv .venv
 .venv/bin/pip install -e .
 ```
 
-依赖里包含 `playwright`，但**不需要执行 `playwright install`** —— 本项目不下载
-Playwright 自带的浏览器，而是通过 CDP 驱动**你本机已有的 Chrome**。
+依赖里**没有 Playwright** —— 浏览器控制由自带的原生 CDP 客户端完成，只有一个纯 Python
+的 `websocket-client` 依赖。这么设计有两个原因：Playwright 在 Termux/Android 上装不起来，
+而且它创建标签页时一定会抢焦点（见下文「不打扰你的浏览」）。
 
-前提是本机装了 Chrome / Chromium / Edge 之一（三选一即可）。装不了浏览器（比如 CI）
-就改用 HTTP 后端：`pip install -e ".[http]"` 并设置 `HLTV_BACKEND=http`。
+前提是本机装了 Chrome / Chromium / Edge 之一（三选一即可）。Linux 上还建议装 `Xvfb`，
+用来提供「界面上看不见」的虚拟显示。装不了浏览器（比如 CI）就改用 HTTP 后端：
+`pip install -e ".[http]"` 并设置 `HLTV_BACKEND=http`。
 
 ## 接入 MCP 客户端
 
@@ -76,7 +78,7 @@ Playwright 自带的浏览器，而是通过 CDP 驱动**你本机已有的 Chro
   "env": {
     "HLTV_BACKEND": "auto",
     "HLTV_MIN_INTERVAL": "3.0",
-    "HLTV_BROWSER_HEADLESS": "0"
+    "HLTV_BROWSER_VISIBLE": "0"
   }
 }
 ```
@@ -153,7 +155,7 @@ Cloudflare 按 **IP 累积信誉**，封禁会逐级升级：
 | `curl_cffi`（Safari 指纹） | ❌ 403 | ❌ 403 |
 | **真实浏览器 + 持久化配置文件** | ✅ **200** | ✅ **200** |
 
-差异不在「有头/无头」，而在两点：**真实浏览器的完整指纹**，以及**使用持久化配置文件上下文**（`browser.contexts[0]`）。用 `new_context()` 新建的匿名上下文同样会被拦。
+差异不在「有头/无头」，而在两点：**真实浏览器的完整指纹**，以及**使用持久化的配置文件上下文**。用匿名上下文同样会被拦。
 
 所以**默认后端就是浏览器**，并且**开箱即用** —— 不需要你先敲命令启动 Chrome：
 
@@ -165,8 +167,53 @@ python scripts/browser_check.py
 启动器会自动完成这些事：
 
 1. 若已有带调试端口的浏览器在跑（或你设了 `HLTV_BROWSER_CDP`），直接复用
-2. 否则自己拉起一个 Chrome，用**独立的持久化 profile**（位于 `~/.cache/hltv-mcp/chrome-profile`）
+2. 否则自己拉起一个浏览器，用**独立的持久化 profile**（位于 `~/.cache/hltv-mcp/chrome-profile`）
 3. MCP 退出时**只关掉自己拉起的那个实例**；你自己的浏览器不会被碰
+
+### 不打扰你的浏览
+
+这是硬性设计目标，不是「尽量」：
+
+* **界面上看不见。** Linux 上启动器会自己造一个 Xvfb 虚拟显示，浏览器有头运行但根本没有
+  显示设备；其他桌面系统把窗口挪到屏幕外。你既看不到窗口，也没有弹窗。
+* **不抢焦点、不动你的标签页。** 所有标签页都以 CDP 的 `background=true` 创建，
+  用完立刻关闭。你正在看的页面不会被跳转，也不会被顶到后台。
+
+这两件事都实测过。用 `document.visibilityState` 和 `document.hasFocus()` 作为客观指标，
+在用户页面全程开着的情况下跑完 4 次真实查询：
+
+| | 查询前 | 全程查询中 / 查询后 |
+|---|---|---|
+| 用户页面 URL | `example.com/` | 未变 |
+| `visibilityState` | `visible` | `visible` |
+| `hasFocus()` | 未变 | 未变 |
+| 标签页数 | 1 | 1（无残留） |
+
+对照实验也做了：用早期实现的 `background=false` 方式，同一场景下用户页面的
+`visibilityState` 会立刻变成 `hidden`、`hasFocus()` 变 `false` —— 也就是被顶掉了。
+这正是本项目**不用 Playwright** 的原因之一（它的 `new_page()` 一定会激活新标签页）。
+
+`python scripts/browser_check.py` 里内置了这项检查，可以自己验证。
+
+### Android / Termux
+
+Termux 是明确支持的目标平台。装依赖：
+
+```bash
+pkg install tur-repo x11-repo
+pkg install chromium xorg-server-xvfb python
+pip install hltv-mcp
+```
+
+三点说明：
+
+* **Chromium 的可执行文件叫 `chromium-browser`**，不是 `chromium`。本项目会自动找到它。
+* **`xorg-server-xvfb` 是必须的** —— 没有它就只能退化成无头模式，而无头会被 Cloudflare 拦。
+* 启动时自动带上 Android 需要的 `--no-sandbox`（Android 上 setuid 沙箱不可用）。
+
+`playwright` 在这里是**装不起来**的 —— 官方直接抛 `Unsupported platform: android`，
+Python 版也没有 Termux 的 wheel。所以本项目不用它，而是用自带的原生 CDP 客户端
+（只需要纯 Python 的 `websocket-client`）。
 
 独立 profile 不是随便选的：一是避免拿你日常的浏览数据去开调试端口，二是 Chrome 在同
 profile 已有实例运行时，新进程只会把标签页塞进旧实例、调试端口根本不会打开。它还有个
@@ -308,6 +355,7 @@ python scripts/hltv_inspect.py /team/6667/x --selector .profile-team-stat
 | `HLTV_BACKEND` | `auto` | 后端：`auto`（优先浏览器）/ `browser`（强制）/ `http`（强制 HTTP） |
 | `HLTV_BROWSER_CDP` | 空 | 复用一个**外部已启动**的浏览器，如 `http://127.0.0.1:9222`。留空则由本服务自动准备 |
 | `HLTV_BROWSER_AUTOLAUNCH` | `1` | 置 `0` 则禁止自动拉起浏览器，只复用已有实例 |
+| `HLTV_BROWSER_VISIBLE` | `0` | 置 `1` 让浏览器窗口可见（调试用）。默认隐藏 |
 | `HLTV_BROWSER_HEADLESS` | 自动 | 置 `1` 强制无头。**注意无头会被 Cloudflare 拦**，非必要别开 |
 | `HLTV_CHROME_BIN` | 自动探测 | 浏览器可执行文件路径（Chrome/Chromium/Edge） |
 | `HLTV_BROWSER_PORT` | `9222` | 自动启动时优先使用的调试端口，被占则自动换 |
@@ -332,7 +380,7 @@ python scripts/health.py --json
 python scripts/hltv_inspect.py /matches   # 页面结构 dump，改版时用来定位新选择器
 
 python tests/test_parsers.py          # 离线：解析逻辑
-python tests/test_launcher.py         # 离线：后端选择、显示环境判断、CDP 探测
+python tests/test_launcher.py         # 离线：后端选择、显示环境、Termux 识别、CDP 探测
 python tests/smoke.py                 # 联网冒烟（约 1.5 分钟）
 python tests/smoke.py --only ranking player career
 ```

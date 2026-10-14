@@ -1,15 +1,16 @@
 [project]
 name = "hltv-mcp"
-version = "1.1.0"
+version = "1.2.0"
 description = "HLTV.org MCP —— 让 AI 直接查询 CS 赛程、赛果、排名、战队、选手与新闻"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [
     "mcp>=2.0",
-    # 默认后端是真实浏览器，playwright 用于通过 CDP 驱动它
-    # 注意：不需要 `playwright install`，本服务复用本机已有的 Chrome
-    "playwright>=1.40",
+    # 默认后端是真实浏览器，通过原生 CDP（WebSocket）驱动它。
+    # 不用 Playwright：它在 Android/Termux 上装不起来（官方不支持 android 平台），
+    # 而且它的 new_page() 一定会激活新标签页，会把用户正在看的页面顶掉。
+    "websocket-client>=1.6",
     # HTTP 后端的 TLS 指纹伪装（HLTV_BACKEND=http 时使用）
     "curl_cffi>=0.7",
     "beautifulsoup4>=4.12",

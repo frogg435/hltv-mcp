@@ -155,6 +155,90 @@ def main() -> int:
     check("BrowserUnavailable 是 HltvError 的子类",
           issubclass(C.BrowserUnavailable, C.HltvError), True)
 
+    print("\n--- 8. Termux / Android 识别 ---")
+    saved = {k: os.environ.get(k) for k in ("TERMUX_VERSION", "PREFIX", "HLTV_CHROME_BIN")}
+    try:
+        os.environ.pop("TERMUX_VERSION", None)
+        os.environ.pop("PREFIX", None)
+        check("普通环境不是 Termux", L._is_termux(), False)
+
+        os.environ["TERMUX_VERSION"] = "0.118.0"
+        check("有 TERMUX_VERSION 即识别", L._is_termux(), True)
+        os.environ.pop("TERMUX_VERSION")
+
+        os.environ["PREFIX"] = "/data/data/com.termux/files/usr"
+        check("靠 PREFIX 路径也能识别", L._is_termux(), True)
+
+        check("Termux 浏览器路径含 chromium-browser",
+              "/data/data/com.termux/files/usr/bin/chromium-browser" in L._termux_candidates(),
+              True)
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    print("\n--- 9. 默认在界面上不可见 ---")
+    # 屏蔽真实的 Xvfb 启动，只验计划本身
+    saved_start = L._VirtualDisplay.start
+    L._VirtualDisplay.start = lambda self: None
+    saved_visible = os.environ.pop("HLTV_BROWSER_VISIBLE", None)
+    saved_headless = os.environ.pop("HLTV_BROWSER_HEADLESS", None)
+    try:
+        plans = L.ChromeLauncher()._plan_attempts()
+        labels = " | ".join(p["label"] for p in plans)
+        check("默认不含「窗口可见」的选项", "窗口可见" not in labels, True)
+        check("默认不含无头优先", plans[0]["headless"], False)
+        check("首选是有头模式", plans[0]["headless"], False)
+
+        os.environ["HLTV_BROWSER_VISIBLE"] = "1"
+        plans = L.ChromeLauncher()._plan_attempts()
+        labels = " | ".join(p["label"] for p in plans)
+        check("显式要求可见时才允许窗口显示", "窗口可见" in labels, True)
+        os.environ.pop("HLTV_BROWSER_VISIBLE")
+
+        os.environ["HLTV_BROWSER_HEADLESS"] = "1"
+        plans = L.ChromeLauncher()._plan_attempts()
+        check("强制无头时只有无头方案", len(plans), 1)
+        check("强制无头为首选", plans[0]["headless"], True)
+    finally:
+        L._VirtualDisplay.start = saved_start
+        os.environ.pop("HLTV_BROWSER_HEADLESS", None)
+        if saved_visible is not None:
+            os.environ["HLTV_BROWSER_VISIBLE"] = saved_visible
+        if saved_headless is not None:
+            os.environ["HLTV_BROWSER_HEADLESS"] = saved_headless
+
+    print("\n--- 10. CDP 客户端的地址解析 ---")
+    from hltv_mcp import cdp as Cdp  # noqa: PLC0415
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    dead_port = sock.getsockname()[1]
+    sock.close()
+    try:
+        Cdp.ws_url_for(f"http://127.0.0.1:{dead_port}", timeout=0.5)
+        check("坏地址应抛 CDPError", "no-raise", "raise")
+    except Cdp.CDPError:
+        check("坏地址抛 CDPError", True, True)
+
+    url, stop = _serve_cdp(b'{"Browser": "x"}')  # 没有 webSocketDebuggerUrl
+    try:
+        Cdp.ws_url_for(url)
+        check("缺 webSocketDebuggerUrl 应抛错", "no-raise", "raise")
+    except Cdp.CDPError:
+        check("缺 webSocketDebuggerUrl 抛 CDPError", True, True)
+    finally:
+        stop()
+
+    url, stop = _serve_cdp(b'{"webSocketDebuggerUrl": "ws://127.0.0.1:1/x"}')
+    try:
+        check("能取出 webSocketDebuggerUrl",
+              Cdp.ws_url_for(url), "ws://127.0.0.1:1/x")
+    finally:
+        stop()
+
     print()
     if failures:
         print(f"{len(failures)} 项失败：{', '.join(failures)}")

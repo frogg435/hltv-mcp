@@ -71,35 +71,66 @@ def main() -> int:
 
     launcher = get_launcher()
     origin = "本服务自动拉起" if launcher.launched_by_us else "复用已有实例"
-    print(f"✓ 已连接：{info.get('browser_version')}（{origin}）")
+    print(f"✓ 已连接：{info.get('browser_version') or '未知版本'}（{origin}）")
     if launcher.mode:
         print(f"  启动方式：{launcher.mode}")
     print(f"  CDP 地址：{info.get('cdp_url')}")
-    print(f"  上下文数：{info.get('contexts')}（复用第一个，即该 profile 的默认配置）")
     print(f"  连接耗时：{time.time() - started:.1f}s")
 
     if args.control_only:
         return 0
 
     # ---- 3. 控制组：证明取页面链路本身通 ----
-    from playwright.sync_api import sync_playwright  # noqa: PLC0415
-
     print(f"\n[控制组] 取一个无防护站点（{CONTROL_URL}），验证取页面链路本身正常")
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.connect_over_cdp(info["cdp_url"])
-            ctx = browser.contexts[0] if browser.contexts else browser.new_context()
-            page = ctx.new_page()
-            try:
-                page.goto(CONTROL_URL, wait_until="domcontentloaded", timeout=30000)
-                print(f"  ✓ {page.title()[:40]} ({len(page.content())}B)")
-            finally:
-                page.close()
+        from hltv_mcp.cdp import CDPSession, ws_url_for
+
+        session = CDPSession(ws_url_for(info["cdp_url"]))
+        tab = session.new_page("about:blank", background=True)
+        try:
+            tab.navigate(CONTROL_URL)
+            tab.wait_for_load(timeout=30)
+            print(f"  ✓ {tab.title()[:40]} ({len(tab.content())}B)")
+        finally:
+            tab.close()
     except Exception as exc:  # noqa: BLE001
         print(f"  ✗ 取页面失败：{str(exc)[:140]}")
         return 1
 
-    # ---- 4. 目标：取 HLTV ----
+    # ---- 4. 关键行为：查询不打扰用户当前页面 ----
+    print("\n[不打扰] 验证后台查询不会顶掉正在浏览的页面")
+    try:
+        from hltv_mcp.cdp import CDPSession, ws_url_for
+
+        session = CDPSession(ws_url_for(info["cdp_url"]))
+        # 先造一个「用户正在看的页面」
+        user = session.new_page("about:blank", background=False)
+        try:
+            user.navigate(CONTROL_URL)
+            user.wait_for_load(timeout=30)
+            before = user.evaluate(
+                "JSON.stringify({vis:document.visibilityState, focus:document.hasFocus()})"
+            )
+            # 同一浏览器里做一次后台查询
+            ai = session.new_page("about:blank", background=True)
+            try:
+                ai.navigate("https://www.hltv.org/")
+                ai.wait_for_load(timeout=45)
+            finally:
+                ai.close()
+            after = user.evaluate(
+                "JSON.stringify({vis:document.visibilityState, focus:document.hasFocus()})"
+            )
+            if before == after and "visible" in after:
+                print(f"  ✓ 用户页面状态不变：{after}")
+            else:
+                print(f"  ✗ 用户页面被打扰了：{before} -> {after}")
+        finally:
+            user.close()
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ? 该项检查跳过（{str(exc)[:80]}）")
+
+    # ---- 5. 目标：取 HLTV ----
     print("\n[目标] 取 HLTV 首页")
     try:
         html = get_browser_fetcher().fetch_html("/")

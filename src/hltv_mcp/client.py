@@ -286,7 +286,7 @@ class HltvClient:
         return self._backend_in_use or ("browser" if wants_browser() else "http")
 
     def _fetch_via_browser(self, path: str) -> str:
-        """浏览器后端。延迟导入，避免没装 playwright 时影响 HTTP 路径。"""
+        """浏览器后端。延迟导入，避免没装 websocket-client 时影响 HTTP 路径。"""
         from .browser import get_browser_fetcher
 
         with self._lock:

@@ -20,8 +20,17 @@
 独立目录还带来一个好处：它是**持久**的，`cf_clearance` 这类 cookie 会留存在里面，
 下次启动时 Cloudflare 的挑战会明显更少。
 
-**有头优先。** 桌面系统上有头浏览器最接近真实用户，判定最宽松。只有在没有图形
-显示（无 `DISPLAY` 的 Linux）时才退回 `--headless=new`。
+**默认在界面上完全不可见。** 用户要的是「后台执行查询」，所以拉起浏览器时不该
+弹出任何窗口。做法是：Linux 上自己造一个 Xvfb 虚拟显示（有头运行但没显示设备），
+其他桌面系统则把窗口挪到屏幕外。设 `HLTV_BROWSER_VISIBLE=1` 可恢复可见，便于调试。
+
+**有头优先，无头是最后手段。** 无头会被 Cloudflare 拦（实测同环境同 IP：无头全部
+停在挑战页，有头全部 200），所以「没有显示器」时先造虚拟显示，而不是直接退化成
+无头 —— 那等于静默失效。
+
+**Android / Termux 是明确支持的目标。** 区别于常规 Linux：浏览器要装
+`tur-repo` + `x11-repo` 里的 Chromium（可执行文件叫 `chromium-browser`），
+必须 `--no-sandbox`，且用 Xvfb 提供虚拟显示。这些都在下面自动处理。
 """
 
 from __future__ import annotations
@@ -103,20 +112,31 @@ _LINUX_CANDIDATES = [
 ]
 
 
-def _playwright_chromium() -> str | None:
-    """Playwright 自带的 Chromium，作为最后的兜底。
+def _is_termux() -> bool:
+    """是否跑在 Android 的 Termux 里。
 
-    注意：这里只是**拿它的可执行文件**，仍然由我们自己用 subprocess 启动，
-    因此不会带上 Playwright 那套自动化标志（那才是被 Cloudflare 识别的根因）。
+    两种判据都用上：Termux 会设 `TERMUX_VERSION`，且其前缀固定是
+    `/data/data/com.termux/files/usr`。有的环境（比如某些 fork 或 proot 里）
+    只满足其中之一。
     """
-    try:
-        from playwright.sync_api import sync_playwright
+    if os.environ.get("TERMUX_VERSION"):
+        return True
+    prefix = os.environ.get("PREFIX", "")
+    return "com.termux" in prefix
 
-        with sync_playwright() as p:
-            path = p.chromium.executable_path
-        return path if path and Path(path).exists() else None
-    except Exception:  # noqa: BLE001 - 没装或没下载浏览器都只是「不可用」
-        return None
+
+def _termux_candidates() -> list[str]:
+    """Termux 上的浏览器位置。
+
+    Termux 不自带浏览器，要从 `tur-repo` / `x11-repo` 装：`pkg install chromium`。
+    装好后可执行文件叫 `chromium-browser`（不是 `chromium`），这个差别很容易踩。
+    """
+    prefix = os.environ.get("PREFIX") or "/data/data/com.termux/files/usr"
+    return [
+        f"{prefix}/bin/chromium-browser",
+        f"{prefix}/bin/chromium",
+        f"{prefix}/bin/google-chrome-stable",
+    ]
 
 
 def find_browser() -> str | None:
@@ -128,6 +148,8 @@ def find_browser() -> str | None:
             return str(path)
         raise BrowserUnavailable(f"HLTV_CHROME_BIN 指向的文件不存在：{path}")
 
+    import shutil
+
     if sys.platform == "darwin":
         for candidate in _MAC_CANDIDATES:
             if Path(candidate).exists():
@@ -136,19 +158,24 @@ def find_browser() -> str | None:
         win_candidates = list(_WIN_CANDIDATES)
         local = os.environ.get("LOCALAPPDATA")
         if local:
-            win_candidates.insert(0, str(Path(local) / "Google" / "Chrome" / "Application" / "chrome.exe"))
+            win_candidates.insert(
+                0, str(Path(local) / "Google" / "Chrome" / "Application" / "chrome.exe")
+            )
         for candidate in win_candidates:
             if Path(candidate).exists():
                 return candidate
     else:
-        import shutil
-
+        # Termux 的路径不在 PATH 的常规查找里（它叫 chromium-browser），先单独试
+        if _is_termux():
+            for candidate in _termux_candidates():
+                if Path(candidate).exists():
+                    return candidate
         for name in _LINUX_CANDIDATES:
             found = shutil.which(name)
             if found:
                 return found
 
-    return _playwright_chromium()
+    return None
 
 
 # --------------------------- CDP 端点探测 ---------------------------
@@ -366,10 +393,16 @@ class ChromeLauncher:
     def _launch(self) -> str:
         binary = find_browser()
         if not binary:
+            hint = (
+                "Termux 上请先装浏览器：pkg install tur-repo x11-repo && "
+                "pkg install chromium xorg-server-xvfb"
+                if _is_termux()
+                else "请安装 Chrome / Chromium / Edge 之一"
+            )
             raise BrowserUnavailable(
-                "找不到 Chrome / Chromium / Edge。请安装其中之一，或用 "
-                "HLTV_CHROME_BIN 指定可执行文件路径；也可以设置 HLTV_BROWSER_CDP "
-                "复用一个已经开着的浏览器。"
+                f"找不到可用的浏览器（{hint}）。也可以用 HLTV_CHROME_BIN 指定"
+                "可执行文件路径，或设置 HLTV_BROWSER_CDP 复用一个已经开着的浏览器；"
+                "实在装不了浏览器就改用 HTTP 后端：HLTV_BACKEND=http。"
             )
 
         errors: list[str] = []
@@ -390,22 +423,45 @@ class ChromeLauncher:
     def _plan_attempts(self) -> list[dict]:
         """准备若干种启动方案，按优先级排列。
 
-        有头优先，因为**无头会被 Cloudflare 拦**（实测：同环境同 IP，无头全部停在
-        挑战页，有头全部 200）。所以「没有显示器」时先造一个虚拟显示，而不是
-        直接退化成无头 —— 那等于静默失效。
+        两条硬约束，它们决定了这里的顺序：
+
+        1. **有头优先** —— 无头会被 Cloudflare 拦（实测：同环境同 IP，无头全部
+           停在挑战页，有头全部 200）。所以「没有显示器」时先造虚拟显示，而不是
+           直接退化成无头，那等于静默失效。
+        2. **默认不显示窗口** —— 用户要的是「后台执行、界面上什么都看不到」。
+           桌面系统上如果直接继承 `DISPLAY`，会真的弹出一个浏览器窗口，所以默认
+           反而不该用它。Linux 用 Xvfb 造一个看不见的显示；没有 Xvfb 的桌面系统
+           则把窗口挪到屏幕外（见 `_spawn`）。
+
+        设 `HLTV_BROWSER_VISIBLE=1` 可以恢复成「用真实显示、窗口可见」，
+        便于调试。
         """
         forced = os.environ.get("HLTV_BROWSER_HEADLESS")
         if forced is not None and forced.strip().lower() in ("1", "true", "yes", "on"):
             return [{"headless": True, "display": None, "label": "无头模式（由 HLTV_BROWSER_HEADLESS 指定）"}]
 
+        visible = os.environ.get("HLTV_BROWSER_VISIBLE", "0").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+
         attempts: list[dict] = []
 
-        # 1. 现成的显示环境
-        current = os.environ.get("DISPLAY", "").strip()
-        if _display_ok(current):
-            attempts.append({"headless": False, "display": None, "label": "有头模式"})
+        # 1. 用户显式要求可见 —— 直接用现成的显示环境
+        if visible:
+            current = os.environ.get("DISPLAY", "").strip()
+            if _display_ok(current):
+                attempts.append({"headless": False, "display": None, "label": "有头模式（窗口可见）"})
+            else:
+                attempts.append(
+                    {"headless": False, "display": None, "label": "有头模式（窗口可见，无显示环境）"}
+                )
+            attempts.append({"headless": True, "display": None, "label": "无头模式"})
+            return attempts
 
-        # 2. 自己造一个虚拟显示（Linux 且装了 Xvfb）
+        # 2. 默认：在 Linux 上建一个看不见的虚拟显示
         if sys.platform.startswith("linux"):
             if self._virtual_display is None:
                 self._virtual_display = _VirtualDisplay()
@@ -415,12 +471,29 @@ class ChromeLauncher:
                     {
                         "headless": False,
                         "display": display,
-                        "label": f"有头模式 + 虚拟显示（Xvfb {display}）",
+                        "label": f"有头模式 + 虚拟显示（Xvfb {display}，界面不可见）",
                     }
                 )
+            # 没有 Xvfb（没装）：仍然有头启动，把窗口挪到屏幕外。
+            # 这不如虚拟显示干净，但比弹出一个窗口强。
+            attempts.append(
+                {
+                    "headless": False,
+                    "display": None,
+                    "label": "有头模式 + 窗口移出屏幕（未装 Xvfb）",
+                }
+            )
+        else:
+            # macOS / Windows 没有 Xvfb，只能把窗口挪到屏幕外
+            attempts.append(
+                {
+                    "headless": False,
+                    "display": None,
+                    "label": "有头模式 + 窗口移出屏幕",
+                }
+            )
 
-        # 3. 最后才考虑无头。它很可能被 Cloudflare 拦，但至少能连上 CDP；
-        #    在某些网络环境下无头也能过，所以不作为首选但保留。
+        # 3. 最后才考虑无头。它很可能被 Cloudflare 拦，但至少能连上 CDP。
         attempts.append({"headless": True, "display": None, "label": "无头模式（可能被 Cloudflare 拦截）"})
         return attempts
 
@@ -440,9 +513,16 @@ class ChromeLauncher:
             "--disable-sync",
             "--disable-translate",
             "--window-size=1440,900",
+            # 安静的启动过程：不要恢复上次会话、不要弹「Chrome 未正常关闭」气泡
+            "--hide-crash-restore-bubble",
+            "--disable-session-crashed-bubble",
         ]
         if headless:
             args.append("--headless=new")
+        if not headless and display is None:
+            # 没有虚拟显示可用时，把窗口挪到屏幕外 —— 用户看不见，就不会被打扰。
+            # 不如 Xvfb 干净（任务栏可能仍有图标），所以排在它后面。
+            args.extend(["--window-position=-32000,-32000"])
         if os.name == "nt" or sys.platform == "darwin":
             # 独立 profile 在桌面系统上会弹钥匙串相关提示，用 mock 更安静
             args.append("--use-mock-keychain")
@@ -452,6 +532,13 @@ class ChromeLauncher:
         if Path("/.dockerenv").exists():
             # 容器内 /dev/shm 通常很小，不关掉容易崩
             args.append("--disable-dev-shm-usage")
+        if _is_termux():
+            # Termux / Android 上 Chromium 用不了 setuid 沙箱，必须显式关掉，
+            # 否则进程秒退。Android 的 /dev/shm 也不适合 Chrome。
+            args.extend(["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"])
+            if display:
+                # Termux 需要知道用哪个 X 显示
+                args.append(f"--display={display}")
 
         env = None
         if display:

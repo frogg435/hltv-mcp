@@ -26,7 +26,7 @@ MAX_LIMIT = 100
 server = MCPServer(
     name="hltv",
     title="HLTV.org",
-    version="1.3.0",
+    version="1.4.0",
     instructions=(
         "查询 HLTV.org 的 Counter-Strike 赛事数据：赛程、赛果、世界排名、战队、选手、"
         "新闻与赛事日历。所有工具都接受数字 id 或名称（如 \"Vitality\"、\"ZywOo\"），"
@@ -725,7 +725,14 @@ def hltv_get_live_scores(match_id: int | None = None, limit: int = 30) -> str:
 
 
 def main() -> None:
-    """入口：默认 stdio，供 MCP 客户端拉起。"""
+    """入口：默认 stdio，供 MCP 客户端拉起。
+
+    启动时在后台预热浏览器（见 client.warmup）—— 冷启动的几秒被藏进
+    「客户端握手 + 用户打字」的空档里，第一次查询就走热路径。
+    """
+    from .client import warmup
+
+    warmup(background=True)
     server.run("stdio")
 
 

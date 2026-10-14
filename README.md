@@ -71,14 +71,14 @@ python3 -m venv .venv
 }
 ```
 
-**不需要任何环境变量。** 首次调用时服务会自动拉起一个浏览器（用独立 profile），
-之后复用；MCP 退出时自动关掉它。几个可选的调优项：
+**不需要任何环境变量。** 服务启动时会在后台**预热**浏览器（拉起 + 过一次 Cloudflare），
+所以**第一次查询就已经是热的** —— 冷启动那几秒被藏在「客户端握手 + 你打字」的空档里。
+之后复用同一个浏览器实例，MCP 退出时自动关掉它。几个可选的调优项：
 
 ```json
 {
   "env": {
     "HLTV_BACKEND": "auto",
-    "HLTV_MIN_INTERVAL": "3.0",
     "HLTV_BROWSER_VISIBLE": "0"
   }
 }
@@ -111,14 +111,15 @@ python3 -m venv .venv
 
 ## 工作原理与已知限制
 
-### 取页面的两种方式
+### 取页面的三种后端
 
 | 后端 | 怎么用 | 特点 |
 |---|---|---|
-| **浏览器**（默认） | 用真实浏览器取页面 | 过 Cloudflare 最稳；唯一能做点击交互；稍慢、需要本机有浏览器 |
+| **浏览器**（默认） | 用真实浏览器取页面 | 过 Cloudflare 最稳；唯一能做点击交互；需要本机有浏览器 |
 | **HTTP** | `curl_cffi` + Safari TLS 指纹 | 快、轻、无需浏览器；但过不了 Cloudflare 的路径级规则 |
+| **hybrid** | 先试 HTTP，被拦了自动改用浏览器 | 两种能力都有；代价是每次先花半秒探一次路 |
 
-`HLTV_BACKEND=auto`（默认）/ `browser` / `http` 控制选择，见下文「后端选择」。
+`HLTV_BACKEND=auto`（默认）/ `browser` / `http` / `hybrid` 控制选择，见下文「后端选择」。
 
 ### Cloudflare
 
@@ -256,10 +257,19 @@ profile 已有实例运行时，新进程只会把标签页塞进旧实例、调
 | `auto`（默认） | **优先浏览器**；只有浏览器**根本起不来**时才降级到 HTTP |
 | `browser` | 强制浏览器。起不来就报错，不降级 |
 | `http` | 强制 HTTP。适合装不了浏览器的环境（CI、纯容器） |
+| `hybrid` | **HTTP 优先**，被 Cloudflare 拦了才自动改用浏览器，并记住「哪类路径必须用浏览器」 |
 
 注意 `auto` 的降级边界：**「页面被 Cloudflare 拦」不算「起不来」**，那种情况不会降级 ——
 因为 HTTP 后端会拿到同样的拦截页，降级只会把错误变得更难理解。只有「找不到浏览器 / 连不上
 调试端口 / 启动超时」这类才降级，且会在 stderr 提示一次并转到 HTTP。
+
+`hybrid` 是 `auto` 的「快路径版」而不是缩水版 —— 最终拿到的数据完全一样，只是把顺序倒过来：
+先花半秒试一次廉价请求，被拦了才启动浏览器。实测 `/stats/*` 有独立的拦截规则，其余路径
+HTTP 全通。
+
+但要如实说：**桌面端 hybrid 并不比默认的浏览器后端快**（本机实测两者都在 1 秒上下）。
+它的价值在弱设备 —— 手机/Termux 上渲染 1MB HTML 的代价比多一次网络往返更高。桌面用户
+直接用默认的 `auto` 就好。
 
 ### 先诊断，再动手
 
@@ -281,8 +291,11 @@ python scripts/health.py          # HTTP 后端：定位是 IP 级封禁还是�
 
 客户端默认做了这些事：
 
-- 请求间隔 **3 秒 + 0–0.8 秒随机抖动**（`HLTV_MIN_INTERVAL` / `HLTV_JITTER` 可调）
-- 内存缓存：赛程 60s、赛果 120s、新闻 300s、排名 1h、选手/战队 30min
+- **浏览器后端**：间隔 **0.5 秒 + 0–0.8 秒随机抖动**（`HLTV_BROWSER_MIN_INTERVAL` / `HLTV_JITTER`）。
+  浏览器请求本身就是「一个真人在翻页」，Cloudflare 的判定依据与裸 HTTP 完全不同，
+  按爬虫的标准自我设限只是白白卡自己
+- **HTTP 后端**：间隔 **3 秒**（`HLTV_MIN_INTERVAL`）。裸 HTTP 请求最像爬虫，也最容易被限流
+- 内存缓存：实时比分 15s、赛程 60s、赛果 120s、新闻 300s、排名 1h、选手/战队 30min
 - 遇到 403 **不立刻重建会话**（那会丢掉已通过的 cookie，反而更糟），先退避重试，最后一次才换会话
 
 如果某个工具持续报 403，把 `HLTV_MIN_INTERVAL` 调到 `5` 或更大，或换网络出口。
@@ -360,11 +373,36 @@ python scripts/hltv_inspect.py /team/6667/x --selector .profile-team-stat
 
 定位到新类名后改 `src/hltv_mcp/parsers.py` 里对应的解析函数即可。所有解析器都遵循「缺字段返回 None，不抛异常」的约定，页面局部变化不会让整个工具调用失败。
 
+## 速度
+
+耗时几乎全在两处：**浏览器冷启动**和**取页面本身**。现在分别这么处理：
+
+| 问题 | 做法 |
+|---|---|
+| 冷启动（起浏览器 + 过 Cloudflare 挑战）全压在第一次查询上 | 服务启动时后台**预热**，把这几秒挪进「客户端握手 + 你打字」的空档 |
+| 浏览器后端被按爬虫标准限速（每次请求硬等 3 秒） | 浏览器后端改用 0.5 秒间隔；HTTP 后端仍保持 3 秒 |
+| 比赛统计页有两段固定 `sleep`（3.5 秒 + 3.0 秒） | 改成「等元素出现 / 等内容变化」，通常不到 1 秒就返回 |
+| 挑战通过后页面由 JS 重载，中间有个「标题正常、内容残缺」的空壳 | 检测到这种情况就等内容稳定再取，避免收到一页残缺数据还不报错 |
+
+本机实测（同一台机器、同一网络，逐页计时）：
+
+| 场景 | 优化前 | 优化后 |
+|---|---|---|
+| 赛程 / 赛果 / 排名 / 实时比分等常规页 | 2.6 – 4.2 秒 | **0.8 – 2.0 秒** |
+| 比赛详细统计（`hltv_get_match_stats`） | 8 秒以上（光固定等待就占 6.5 秒） | **约 2 秒** |
+| 第一次查询（冷启动） | 2 – 15 秒 | **≈ 0**（已被启动预热吸收） |
+
+> 有一条**不是**代码能修的：Cloudflare 在**首次访问一条新路径**时（`/stats/*` 尤其明显）
+> 可能给一次真的挑战，实测要 9 – 25 秒。之后同一条路径都是 1 秒级。所以「第一次查某个
+> 选手的逐年 Rating」偏慢属于正常，同一个选手再查就快了。
+
 ## 配置
 
 | 环境变量 | 默认 | 说明 |
 |---|---|---|
-| `HLTV_BACKEND` | `auto` | 后端：`auto`（优先浏览器）/ `browser`（强制）/ `http`（强制 HTTP） |
+| `HLTV_BACKEND` | `auto` | 后端：`auto`（优先浏览器）/ `browser`（强制）/ `http`（强制 HTTP）/ `hybrid`（HTTP 优先，被拦自动换浏览器） |
+| `HLTV_WARMUP` | `1` | 启动时后台预热浏览器，让第一次查询不必等冷启动。置 `0` 关闭 |
+| `HLTV_WARMUP_PAGES` | `/matches` | 预热时顺带取一页，用来确认浏览器与 Cloudflare 都通了 |
 | `HLTV_BROWSER_CDP` | 空 | 复用一个**外部已启动**的浏览器，如 `http://127.0.0.1:9222`。留空则由本服务自动准备 |
 | `HLTV_BROWSER_AUTOLAUNCH` | `1` | 置 `0` 则禁止自动拉起浏览器，只复用已有实例 |
 | `HLTV_BROWSER_VISIBLE` | `0` | 置 `1` 让浏览器窗口可见（调试用）。默认隐藏 |
@@ -374,11 +412,16 @@ python scripts/hltv_inspect.py /team/6667/x --selector .profile-team-stat
 | `HLTV_CHROME_PROFILE` | `~/.cache/hltv-mcp/chrome-profile` | 自动启动时用的独立 profile 目录 |
 | `HLTV_CACHE_DIR` | 平台缓存目录 | 存放 profile、浏览器日志、端口记录 |
 | `HLTV_PROXY` | 空 | 出口代理，形如 `http://user:pass@host:port` 或 `socks5://host:port`。**遇到 IP 级封锁时的主要解法** |
-| `HLTV_MIN_INTERVAL` | `3.0` | 两次请求的最小间隔（秒） |
+| `HLTV_MIN_INTERVAL` | `3.0` | **HTTP 后端**两次请求的最小间隔（秒） |
+| `HLTV_BROWSER_MIN_INTERVAL` | `0.5` | **浏览器后端**两次请求的最小间隔（秒） |
+| `HLTV_HYBRID_MIN_INTERVAL` | `1.0` | hybrid 模式里那次探路 HTTP 请求的最小间隔（秒） |
 | `HLTV_JITTER` | `0.8` | 间隔上的随机抖动上限（秒） |
 | `HLTV_TIMEOUT` | `40` | 单次请求超时（秒） |
 | `HLTV_MAX_RETRIES` | `3` | 失败重试次数 |
 | `HLTV_NAV_RETRIES` | `3` | 页面导航重试次数（浏览器后端） |
+| `HLTV_CHALLENGE_WAIT` | `25` | 等 Cloudflare 挑战通过的上限（秒） |
+| `HLTV_CHALLENGE_POLL` | `0.6` | 挑战轮询间隔（秒） |
+| `HLTV_BLOCK_ASSETS` | `0` | 置 `1` 拦掉图片/字体/广告统计脚本。实测 HLTV 以服务端渲染的 HTML 为主，桌面端开了反而略慢；弱设备可以自己试 |
 | `HLTV_IMPERSONATE` | `safari17_0` | HTTP 后端的 TLS 指纹，可选 `chrome131`、`firefox135` 等 |
 
 也识别标准的 `HTTPS_PROXY` / `ALL_PROXY`。

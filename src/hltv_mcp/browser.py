@@ -41,12 +41,13 @@ HTTP 后端（`curl_cffi`）在两种情况下会失败：
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 from contextlib import contextmanager
 
 from .cdp import CDPError, CDPSession, CDPTab, ws_url_for
-from .client import BrowserUnavailable, HLTV_BASE, HltvError
+from .client import BrowserUnavailable, HLTV_BASE, HltvError, _env_number
 
 DEFAULT_CDP_URL = os.environ.get("HLTV_BROWSER_CDP", "")
 
@@ -54,13 +55,91 @@ DEFAULT_CDP_URL = os.environ.get("HLTV_BROWSER_CDP", "")
 _CHALLENGE_MARKERS = ("Just a moment", "Attention Required", "Checking your browser")
 
 # 等待 Cloudflare 挑战自动通过的最长时间（秒）。
-# 真实浏览器 + 正常 IP 通常在 5 秒内通过。
-CHALLENGE_WAIT = float(os.environ.get("HLTV_CHALLENGE_WAIT", "25"))
+# 真实浏览器 + 正常 IP 通常在 5 秒内通过，但**首次访问某条新路径**时实测见过
+# 9-15 秒的。所以这个值不能压得太紧：压到 15 秒，那些「慢但在推进」的挑战就会
+# 被判失败进而重试，反而更慢。25 秒是「足够宽容」与「不至于坐等太久」的折中。
+CHALLENGE_WAIT = _env_number("HLTV_CHALLENGE_WAIT", 25.0)
 
 # 页面导航重试次数。实测约十分之一的请求会撞上瞬态 Cloudflare 挑战页，
 # 重开一个标签页重试即可恢复，因此不能只试一次。
-NAV_RETRIES = int(os.environ.get("HLTV_NAV_RETRIES", "3"))
-PAGE_TIMEOUT = int(os.environ.get("HLTV_PAGE_TIMEOUT", "45"))
+NAV_RETRIES = _env_number("HLTV_NAV_RETRIES", 3, int)
+PAGE_TIMEOUT = _env_number("HLTV_PAGE_TIMEOUT", 45, int)
+
+# 页面加载时是否拦掉「与取数据无关」的资源。**默认关闭**。
+#
+# 实测结论（同机同网络，各测数次）：HLTV 是服务端渲染，正文全在 HTML 里，
+# 一个赛程页总共只有 19 个静态资源、压缩后约 68KB。拦掉它们省不下什么，
+# 首屏反而因为多走一次 Network 域协商而略慢（1.63s vs 1.14s）。
+#
+# 留着这个开关是因为**手机/Termux 上的账不一样**：弱 CPU 下执行广告与统计
+# 脚本的代价比带宽更疼。觉得慢可以设 HLTV_BLOCK_ASSETS=1 亲自比一次。
+BLOCK_ASSETS = os.environ.get("HLTV_BLOCK_ASSETS", "0").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
+
+# 只拦「确定与数据无关」的东西。**CSS 和本站脚本不拦** —— 它们可能参与渲染，
+# 拦了有静默改变 DOM 内容的风险，不值得为那点速度去赌。
+_BLOCKED_URL_PATTERNS = [
+    # 图片 / 媒体 / 字体
+    "*.png",
+    "*.jpg",
+    "*.jpeg",
+    "*.gif",
+    "*.webp",
+    "*.svg",
+    "*.ico",
+    "*.bmp",
+    "*.mp4",
+    "*.webm",
+    "*.mov",
+    "*.mp3",
+    "*.m4a",
+    "*.woff",
+    "*.woff2",
+    "*.ttf",
+    "*.otf",
+    "*.eot",
+    # 第三方统计 / 广告：只会拖慢页面，对本项目零价值
+    "*google-analytics.com/*",
+    "*googletagmanager.com/*",
+    "*analytics.google.com/*",
+    "*doubleclick.net/*",
+    "*googlesyndication.com/*",
+    "*googleadservices.com/*",
+    "*adservice.google.com/*",
+    "*facebook.net/*",
+    "*hotjar.com/*",
+    "*sentry.io/*",
+    "*scorecardresearch.com/*",
+    "*clarity.ms/*",
+    "*criteo.com/*",
+    "*taboola.com/*",
+    "*outbrain.com/*",
+]
+
+
+def _apply_blocklist(tab: "CDPTab") -> None:
+    """给标签页装上资源黑名单。**必须在导航之前调用**，否则首个页面拦不到。"""
+    if not BLOCK_ASSETS:
+        return
+    try:
+        tab.call("Network.enable")
+        tab.call("Network.setBlockedURLs", {"urls": _BLOCKED_URL_PATTERNS})
+    except CDPError:
+        # 拦不了最多是慢一点，不该让这次取数据失败
+        pass
+
+
+# 比赛页里指向「整场统计」的链接。注意页面上有多个 /stats/matches/ 链接，
+# 带 mapstatsid 的是单张地图的统计，要排除掉（见 fetch_match_stats）。
+_STATS_HREF_RE = re.compile(r"""href=["'](/stats/matches/[^"']+)["']""")
+
+# Cloudflare 挑战页的轮询间隔。挑战通常在 1-3 秒内自动通过，间隔太大会让
+# 「已经通过」这件事白白多等一轮。
+CHALLENGE_POLL = _env_number("HLTV_CHALLENGE_POLL", 0.6)
 
 
 def _looks_like_challenge(title: str, html: str) -> bool:
@@ -68,6 +147,29 @@ def _looks_like_challenge(title: str, html: str) -> bool:
         return True
     head = html[:4000]
     return "cf-chl" in head or "Just a moment" in head
+
+
+# 就地判断「当前是不是 Cloudflare 挑战页」的 JS 表达式，只回传一个布尔值。
+#
+# 为什么不把 HTML 取回来判断：挑战页有 120KB，而轮询每 0.6 秒一次 —— 每次都把
+# 它整个序列化传回来，只为了算一个布尔，纯属浪费。实测换成这个表达式后，
+# 轮询本身的往返开销从秒级降到毫秒级。
+_CHALLENGE_JS = r"""
+(() => {
+  const t = document.title || '';
+  if (/just a moment|attention required|checking your browser/i.test(t)) return true;
+  const head = (document.documentElement.outerHTML || '').slice(0, 4000);
+  return head.includes('cf-chl') || head.includes('Just a moment');
+})()
+"""
+
+
+def _on_challenge_page(tab: CDPTab) -> bool:
+    """当前标签页是否停在 Cloudflare 挑战页。"""
+    try:
+        return bool(tab.evaluate(_CHALLENGE_JS))
+    except CDPError:
+        return False
 
 
 def _looks_suspicious(title: str, html: str) -> bool:
@@ -85,6 +187,30 @@ def _looks_suspicious(title: str, html: str) -> bool:
     return True
 
 
+def _settle(tab: "CDPTab", *, max_wait: float = 8.0, idle: float = 0.35) -> str:
+    """等页面内容长度稳定下来，返回稳定后的 HTML。
+
+    为什么需要它：**Cloudflare 挑战通过之后，页面是由 JS 重新加载出来的。**
+    在刚通过的那一瞬间，`document.title` 已经是正常标题，但 DOM 里还只是个壳 ——
+    实测只有 120KB，而正常页面是 950KB。任何只看标题的判断都会把这个壳当成
+    正常页面收下，解析出来是一堆缺失的数据，**而且不会报错**。
+
+    判据用「连续两次采样长度一致」：正常页面通常 0.4 秒内就稳定，挑战后的壳
+    则会在几百毫秒内被真实内容顶掉。
+    """
+    deadline = time.monotonic() + max_wait
+    html = tab.content()
+    last_size = -1
+    while time.monotonic() < deadline:
+        size = len(html)
+        if size == last_size:
+            return html
+        last_size = size
+        tab.wait(idle)
+        html = tab.content()
+    return html
+
+
 def _is_autolaunched() -> bool:
     """当前连的浏览器是不是由本服务拉起的（用于自检输出）。"""
     try:
@@ -93,6 +219,17 @@ def _is_autolaunched() -> bool:
         return get_launcher().launched_by_us
     except Exception:  # noqa: BLE001
         return False
+
+
+def _pick_stats_href(html: str) -> str | None:
+    """从比赛页 HTML 里挑出「整场比赛统计」的链接。
+
+    优先不含 `mapstatsid` 的那个 —— 带它的是单张地图的统计，语义不同。
+    """
+    hrefs = _STATS_HREF_RE.findall(html or "")
+    if not hrefs:
+        return None
+    return next((h for h in hrefs if "mapstatsid" not in h), hrefs[0])
 
 
 class BrowserFetcher:
@@ -157,6 +294,8 @@ class BrowserFetcher:
             tab: CDPTab | None = None
             try:
                 tab = session.new_page("about:blank", background=True)
+                # 黑名单要在导航前装好，否则首页就白下了一堆图片和统计脚本
+                _apply_blocklist(tab)
                 tab.navigate(url)
                 tab.wait_for_load(timeout=PAGE_TIMEOUT)
                 if wait_after:
@@ -218,13 +357,26 @@ class BrowserFetcher:
     # ------------------------------------------------------------------
     @staticmethod
     def _await_challenge(tab: CDPTab) -> bool:
-        """等 Cloudflare 挑战自动通过。返回 True 表示仍停在挑战页。"""
+        """等 Cloudflare 挑战自动通过。返回 True 表示仍停在挑战页。
+
+        注意「通过」不等于「不再是挑战页」：挑战通过后页面会被 JS 重载一次，
+        中间有几百毫秒是「标题正常、内容残缺」。因此**确实经历过挑战**时要多等
+        一步内容稳定（见 `_settle`），否则会静默收下一个空壳页面。
+
+        轮询用的是只回传布尔的 JS 表达式（`_on_challenge_page`），不是把 HTML
+        取回来判断 —— 挑战页 120KB，每 0.6 秒传一次全文纯属浪费。
+        """
         deadline = time.monotonic() + CHALLENGE_WAIT
-        html = tab.content()
-        while _looks_like_challenge(tab.title(), html) and time.monotonic() < deadline:
-            tab.wait(1.2)
-            html = tab.content()
-        return _looks_like_challenge(tab.title(), html)
+        challenged = _on_challenge_page(tab)
+        was_challenged = challenged
+        while challenged and time.monotonic() < deadline:
+            tab.wait(CHALLENGE_POLL)
+            challenged = _on_challenge_page(tab)
+        if challenged:
+            return True
+        if was_challenged:
+            _settle(tab)
+        return False
 
     # ------------------------------------------------------------------
     def fetch_match_stats(
@@ -245,39 +397,62 @@ class BrowserFetcher:
         Returns:
             {"stats_url", "available_maps", "map", "html"}
         """
-        # 步骤一：比赛页里的 "Detailed stats" 指向另一套 ID，必须先取出来。
+        # 步骤一：先拿到「整场统计」页的地址。
+        #
+        # 这一步只为从比赛页里抠一个 href，不需要任何交互，所以走 `get_client()`
+        # 的统一入口而不是自己开标签页 —— 它会按后端配置选路（hybrid 下就是一次
+        # 0.5 秒的 HTTP 请求，比开浏览器快好几倍）。
         #
         # 注意页面上有**多个**这类链接，且含义不同：
         #   /stats/matches/mapstatsid/241574/...   ← 单张地图的统计
         #   /stats/matches/131941/...              ← 整场比赛的统计（要的是这个）
         # 实测直接取第一个会拿到 mapstatsid 形式，那样地图切换器虽有，但语义上被
         # 限定在某一张图上。所以优先挑不含 mapstatsid 的那个。
-        stats_href = None
-        with self.page(f"/matches/{int(match_id)}/{slug}") as tab:
-            stats_href = tab.evaluate(
-                """
-                (() => {
-                  const links = [...document.querySelectorAll("a[href^='/stats/matches/']")]
-                      .map(a => a.getAttribute('href'));
-                  return links.find(h => !h.includes('mapstatsid')) || links[0] || null;
-                })()
-                """
-            )
+        from .client import get_client
+
+        match_html = get_client().fetch_html(f"/matches/{int(match_id)}/{slug}")
+        stats_href = _pick_stats_href(match_html)
+
+        if not stats_href:
+            # 兜底：万一链接是前端动态插进去的，静态 HTML 里看不到，就真开一个
+            # 页面用 JS 再找一次。正常路径不会走到这里。
+            with self.page(f"/matches/{int(match_id)}/{slug}") as tab:
+                stats_href = tab.evaluate(
+                    """
+                    (() => {
+                      const links = [...document.querySelectorAll("a[href^='/stats/matches/']")]
+                          .map(a => a.getAttribute('href'));
+                      return links.find(h => !h.includes('mapstatsid')) || links[0] || null;
+                    })()
+                    """
+                )
         if not stats_href:
             raise HltvError(
                 f"比赛 {match_id} 没有详细统计页（比赛可能尚未开始，或数据未生成）。"
             )
 
         # 步骤二：打开统计页，点地图，再读渲染结果
-        with self.page(stats_href, wait_after=3.5) as tab:
+        with self.page(stats_href) as tab:
+            # 只要地图按钮出现就能干活，没必要等页面彻底安静。原来这里是固定
+            # 睡 3.5 秒，实测按钮通常 0.5-1 秒就位 —— 剩下两秒半纯属白等。
+            tab.wait_for_selector(".stats-match-map", timeout=8.0)
             available_maps = [text for text in tab.texts(".stats-match-map") if text]
 
             if map_name and map_name.lower() != "all":
+                before = tab.evaluate("(document.body.innerText || '').length") or 0
                 if not tab.click_by_text(".stats-match-map", map_name):
                     raise HltvError(
                         f"找不到地图 {map_name!r}。本场比赛可选：{available_maps}"
                     )
-                tab.wait(3.0)
+                # 点击后是前端重渲染，完成时间不确定。拿「正文长度变了」当完成
+                # 信号：一有变化就立刻走（通常 0.3 秒），实在等不到也最多 3 秒，
+                # 不比原来的固定等待更差。
+                tab.wait_until(
+                    f"((document.body.innerText || '').length) !== {int(before)}",
+                    timeout=3.0,
+                    poll=0.1,
+                )
+                tab.wait(0.25)  # 让替换完的那一帧稳定下来
 
             html = tab.content()
 

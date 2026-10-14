@@ -47,13 +47,13 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from .client import BrowserUnavailable
+from .client import BrowserUnavailable, _env_number
 
 # 默认调试端口。若被非 CDP 服务占用，会自动换一个空闲端口。
-DEFAULT_PORT = int(os.environ.get("HLTV_BROWSER_PORT", "9222"))
+DEFAULT_PORT = _env_number("HLTV_BROWSER_PORT", 9222, int)
 
 # 启动后等待 CDP 端点就绪的上限（秒）。冷启动（首次建 profile）可能偏慢。
-STARTUP_TIMEOUT = float(os.environ.get("HLTV_BROWSER_STARTUP_TIMEOUT", "45"))
+STARTUP_TIMEOUT = _env_number("HLTV_BROWSER_STARTUP_TIMEOUT", 45.0)
 
 # 是否允许自动拉起浏览器。关掉后只复用已经开着的实例。
 AUTOLAUNCH = os.environ.get("HLTV_BROWSER_AUTOLAUNCH", "1").strip().lower() not in (

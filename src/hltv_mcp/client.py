@@ -35,21 +35,52 @@ from bs4 import BeautifulSoup
 
 HLTV_BASE = "https://www.hltv.org"
 
+
+def _env_number(name: str, default, cast=float):
+    """读一个数字型环境变量，留空或写错时回落到默认值。
+
+    留空（`HLTV_TIMEOUT=`）在 .env 文件与 CI 变量里很常见，而 `float("")` 会抛
+    ValueError 把整个模块炸掉 —— 那意味着服务直接起不来。这里宁可悄悄用默认值：
+    配置写错时，用户想要的是「还能用」，不是「启动失败」。
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return cast(raw)
+    except (TypeError, ValueError):
+        return default
+
 # 实测在 Cloudflare 面前的行为差异：
 #   chrome124 / chrome120 -> 403 Just a moment...
 #   safari17_0            -> 200 正常页面
 # 换网络环境后表现可能不同，所以做成可配置。
 IMPERSONATE = os.environ.get("HLTV_IMPERSONATE", "safari17_0")
 
-DEFAULT_TIMEOUT = int(os.environ.get("HLTV_TIMEOUT", "40"))
+DEFAULT_TIMEOUT = _env_number("HLTV_TIMEOUT", 40, int)
 
 # 请求间隔是这里最关键的参数。HLTV 位于 Cloudflare 之后，短时间内的密集请求
 # 会让当前 IP 被单独限流（表现为某一路径持续 403，其他路径正常），且恢复需要
 # 数分钟到数小时。默认取 3 秒并叠加随机抖动，配合缓存足以支撑对话式查询。
-DEFAULT_MIN_INTERVAL = float(os.environ.get("HLTV_MIN_INTERVAL", "3.0"))
-JITTER = float(os.environ.get("HLTV_JITTER", "0.8"))
+#
+# 注意这个 3 秒是给 **HTTP 后端**定的：裸 HTTP 请求最像爬虫，也最容易被限流。
+DEFAULT_MIN_INTERVAL = _env_number("HLTV_MIN_INTERVAL", 3.0)
 
-DEFAULT_MAX_RETRIES = int(os.environ.get("HLTV_MAX_RETRIES", "3"))
+# 浏览器后端不需要那么长的间隔，理由有三：
+#   1. 它就是「一个真人在翻页」，Cloudflare 对它的判定依据完全不同
+#   2. CDP 调用本身已经串行化，天然不存在并发冲击
+#   3. 每次取页面前后已经花了 1-3 秒，再叠 3 秒纯粹是自己卡自己
+# 实测把这里从 3 秒降到 0.5 秒，单次查询的快路径能省下 1.5-3 秒。
+BROWSER_MIN_INTERVAL = _env_number("HLTV_BROWSER_MIN_INTERVAL", 0.5)
+
+# hybrid 模式里那次「探路」HTTP 请求的间隔。比纯 HTTP 后端的 3 秒小得多
+# （命中的都是没被拦的常规路径），但也不设成 0 —— 裸 HTTP 请求比浏览器扎眼，
+# 该给的礼貌还是要给。
+HYBRID_HTTP_MIN_INTERVAL = _env_number("HLTV_HYBRID_MIN_INTERVAL", 1.0)
+
+JITTER = _env_number("HLTV_JITTER", 0.8)
+
+DEFAULT_MAX_RETRIES = _env_number("HLTV_MAX_RETRIES", 3, int)
 
 # 出口 IP 是这套方案唯一真正脆弱的环节。
 # Cloudflare 会按 IP 累积信誉：同一 IP 短时间内请求过多，会从「某条路径被拦」
@@ -80,8 +111,12 @@ PROXY = _proxy_from_env()
 #                   页面被 Cloudflare 拦不算「起不来」，那种情况降级没意义。
 #   browser     —— 强制浏览器。起不来就报错，不做任何降级。
 #   http        —— 强制 HTTP。适合装不了浏览器的环境（CI、容器）。
+#   hybrid      —— HTTP 优先，被 Cloudflare 拦了才落到浏览器，并记住「哪些路径
+#                   必须用浏览器」。拿到的数据与 auto 完全一致（拿不到会自动换
+#                   浏览器），但常规页面快好几倍：HTTP 约 0.5-1.2 秒，浏览器
+#                   约 1.5-3 秒。想更快的用户可以切到这个。
 BACKEND = os.environ.get("HLTV_BACKEND", "auto").strip().lower()
-if BACKEND not in ("auto", "browser", "http"):
+if BACKEND not in ("auto", "browser", "http", "hybrid"):
     BACKEND = "auto"
 
 # 显式指定 CDP 地址（复用外部已开着的浏览器）。留空则由 launcher 自动准备。
@@ -89,8 +124,8 @@ BROWSER_CDP = os.environ.get("HLTV_BROWSER_CDP", "").strip()
 
 
 def wants_browser() -> bool:
-    """当前配置是否要走浏览器后端。"""
-    return BACKEND in ("auto", "browser")
+    """当前配置是否允许走浏览器后端。"""
+    return BACKEND in ("auto", "browser", "hybrid")
 
 
 class HltvError(RuntimeError):
@@ -146,6 +181,10 @@ class HltvClient:
         # 记录实际生效的后端，供工具回传与诊断脚本读取
         self._backend_in_use: str | None = None
         self._fallback_noted = False
+        # hybrid 专用：已经被证实「HTTP 拿不到、必须走浏览器」的路径前缀。
+        # 记住它，后续同类路径直接走浏览器，省掉每次白挨一遍 403。
+        self._browser_only_paths: set[str] = set()
+        self._hybrid_noted = False
 
     # ---------- 会话管理 ----------
 
@@ -182,9 +221,15 @@ class HltvClient:
 
     # ---------- 限速 ----------
 
-    def _throttle(self) -> None:
+    def _throttle(self, min_interval: float | None = None) -> None:
+        """距上次请求不足 `min_interval` 就补足等待。
+
+        `min_interval` 缺省用 HTTP 后端的保守值；浏览器后端会传一个更小的值，
+        因为它的风险模型完全不同（见模块顶部 BROWSER_MIN_INTERVAL 的说明）。
+        """
+        interval = self.min_interval if min_interval is None else min_interval
         elapsed = time.monotonic() - self._last_request_at
-        wait = self.min_interval + random.uniform(0, JITTER) - elapsed
+        wait = interval + random.uniform(0, JITTER) - elapsed
         if wait > 0:
             time.sleep(wait)
         self._last_request_at = time.monotonic()
@@ -236,6 +281,9 @@ class HltvClient:
         后端按 `HLTV_BACKEND` 选择（默认 `auto` = 优先浏览器）。
         缓存键带上实际使用的后端，避免降级前后拿到混在一起的结果。
         """
+        if BACKEND == "hybrid":
+            return self._fetch_hybrid(path, bypass_cache=bypass_cache)
+
         use_browser = self._should_use_browser()
         cache_key = ("browser:" if use_browser else "") + path
         if not bypass_cache:
@@ -271,6 +319,71 @@ class HltvClient:
             return False
         return True
 
+    # ---------- hybrid：HTTP 优先，被拦才落浏览器 ----------
+
+    def _fetch_hybrid(self, path: str, *, bypass_cache: bool = False) -> str:
+        """HTTP 优先，被 Cloudflare 拦了才落到浏览器。
+
+        这不是 `auto` 的「缩水版」而是「快路径版」：最终拿到的数据完全一样，
+        只是把顺序倒过来 —— 先花半秒试一次廉价请求，被拦了才启动浏览器。
+        实测 `/stats/*` 这类有独立规则的路径会被拦，其余路径 HTTP 全通，所以
+        绝大多数查询走的是快路径（约 0.5-1.2 秒，而浏览器约 1.5-3 秒）。
+
+        被拦过的路径按前缀记住，之后直接走浏览器，不必每次都重挨一遍 403。
+        """
+        cache_key = "hybrid:" + path
+        if not bypass_cache:
+            cached = self._cache_get(cache_key)
+            if cached is not None:
+                return cached
+
+        prefix = self._path_prefix(path)
+        if prefix not in self._browser_only_paths:
+            try:
+                # 只试一次，不做退避重试：浏览器就在旁边等着，让用户陪着等完
+                # 那 24 秒退避毫无意义。
+                html = self._fetch_via_http(
+                    path,
+                    cache_key,
+                    retries=1,
+                    min_interval=HYBRID_HTTP_MIN_INTERVAL,
+                )
+            except HltvError as exc:
+                self._browser_only_paths.add(prefix)
+                self._note_hybrid_switch(path, exc)
+            else:
+                self._backend_in_use = "http"
+                return html
+
+        html = self._fetch_via_browser(path)
+        self._backend_in_use = "browser"
+        self._cache_put(cache_key, html, self._cache_bucket(path))
+        return html
+
+    @staticmethod
+    def _path_prefix(path: str) -> str:
+        """把路径归并成「前两段」，用于记住哪类路径必须走浏览器。
+
+        `/stats/players/11816/ropz` -> `/stats/players`，记住一次，该类别下
+        所有选手都受益，而不是每个 ID 都重新试一遍 HTTP。
+        """
+        clean = path.split("?", 1)[0].strip("/")
+        parts = [p for p in clean.split("/") if p]
+        return "/" + "/".join(parts[:2])
+
+    def _note_hybrid_switch(self, path: str, exc: Exception) -> None:
+        """hybrid 首次切到浏览器时提示一次，避免日志被刷满。"""
+        if self._hybrid_noted:
+            return
+        self._hybrid_noted = True
+        import sys
+
+        print(
+            f"[hltv-mcp] hybrid：{path} 用 HTTP 拿不到（{exc}），已改用浏览器后端；"
+            "同一类路径后续都直接用浏览器。",
+            file=sys.stderr,
+        )
+
     def _note_fallback(self, exc: Exception) -> None:
         """降级只提示一次，避免把日志刷满。"""
         if self._fallback_noted:
@@ -293,16 +406,30 @@ class HltvClient:
         from .browser import get_browser_fetcher
 
         with self._lock:
-            self._throttle()
+            self._throttle(BROWSER_MIN_INTERVAL)
             return get_browser_fetcher().fetch_html(path)
 
-    def _fetch_via_http(self, path: str, cache_key: str) -> str:
+    def _fetch_via_http(
+        self,
+        path: str,
+        cache_key: str,
+        *,
+        retries: int | None = None,
+        min_interval: float | None = None,
+    ) -> str:
+        """HTTP 后端取页面。
+
+        `retries` 缺省用 `max_retries`（3 次退避，约 24 秒）。hybrid 模式会传 1 ——
+        它只是在「探路」，一次不通就换浏览器，不该让用户陪着等完退避。
+        `min_interval` 缺省用 HTTP 后端的保守值；hybrid 会传一个更小的数。
+        """
         last_error: Exception | None = None
         rate_limited = False
+        attempts = self.max_retries if retries is None else max(1, int(retries))
 
-        for attempt in range(self.max_retries):
+        for attempt in range(attempts):
             with self._lock:
-                self._throttle()
+                self._throttle(min_interval)
                 try:
                     resp = self.session.get(HLTV_BASE + path, timeout=self.timeout)
                 except Exception as exc:  # noqa: BLE001 - 网络层异常统一转 HltvError
@@ -332,7 +459,7 @@ class HltvClient:
                 rate_limited = True
                 last_error = HltvError("HTTP 403（Cloudflare 限流）")
                 time.sleep(4.0 * (attempt + 1))
-                if attempt == self.max_retries - 1:
+                if attempt == attempts - 1:
                     self.reset_session()
                 continue
 
@@ -350,7 +477,7 @@ class HltvClient:
                 "建议：稍后重试；或调大 HLTV_MIN_INTERVAL（如 5）降低请求频率；"
                 "若长期如此，请更换网络出口。"
             )
-        raise HltvError(f"请求失败（重试 {self.max_retries} 次）：{path}｜{last_error}")
+        raise HltvError(f"请求失败（重试 {attempts} 次）：{path}｜{last_error}")
 
     def fetch_soup(self, path: str, *, bypass_cache: bool = False) -> BeautifulSoup:
         return BeautifulSoup(self.fetch_html(path, bypass_cache=bypass_cache), "lxml")
@@ -370,3 +497,61 @@ def get_client() -> HltvClient:
         if _shared is None:
             _shared = HltvClient()
         return _shared
+
+
+# 预热：开服时就把浏览器和 Cloudflare 通行证备好。
+#
+# 为什么值得做：冷启动的代价全落在**第一次调用**上 —— 起浏览器、过一次
+# Cloudflare 挑战，桌面约 3-6 秒，Termux/手机上一不留神就是十几秒。而这段
+# 时间用户其实是在等模型思考，本来就有空档。把它挪到服务启动时（后台线程，
+# 不阻塞 MCP 握手），第一次真查询就变成热路径。
+WARMUP = os.environ.get("HLTV_WARMUP", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
+
+# 预热时顺手取一页。只取一页就够：目的不是把数据缓存起来（TTL 也留不住），
+# 而是确认「浏览器起来了 + Cloudflare 放行」。多取只是白白消耗请求额度。
+WARMUP_PAGES = tuple(
+    p for p in os.environ.get("HLTV_WARMUP_PAGES", "/matches").split(",") if p.strip()
+)
+
+
+def warmup(*, background: bool = True, pages: tuple[str, ...] | None = None) -> None:
+    """提前把浏览器与 Cloudflare 通行证准备好。
+
+    设 `HLTV_WARMUP=0` 可关闭；`HLTV_WARMUP_PAGES` 可改要预取的路径。
+    """
+    if not WARMUP or not wants_browser() or BACKEND == "http":
+        return
+
+    targets = pages if pages is not None else WARMUP_PAGES
+
+    def _run() -> None:
+        client = get_client()
+        try:
+            from .browser import get_browser_fetcher
+
+            get_browser_fetcher().cdp_url  # 触发自动拉起浏览器
+        except Exception as exc:  # noqa: BLE001 - 预热失败不影响正式请求
+            _warmup_log(f"浏览器预热失败（正式请求时会重试）：{exc}")
+            return
+        for path in targets:
+            try:
+                client.fetch_html(path)
+                _warmup_log(f"预热完成：{path}")
+            except Exception as exc:  # noqa: BLE001
+                _warmup_log(f"预热 {path} 失败（不影响后续请求）：{exc}")
+
+    if background:
+        threading.Thread(target=_run, name="hltv-warmup", daemon=True).start()
+    else:
+        _run()
+
+
+def _warmup_log(message: str) -> None:
+    import sys
+
+    print(f"[hltv-mcp] {message}", file=sys.stderr)

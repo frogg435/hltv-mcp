@@ -90,6 +90,32 @@ class CDPTab:
         """等待若干秒（给前端渲染留时间）。"""
         time.sleep(seconds)
 
+    def wait_until(self, expression: str, timeout: float = 10.0, *, poll: float = 0.15) -> bool:
+        """轮询执行 JS 表达式，直到它返回真值。超时返回 False。
+
+        用它替代「固定睡 N 秒」：前端渲染完成的时间是不确定的 —— 定短了会读到
+        旧内容，定长了就是白等。实测 HLTV 的统计页切换地图后通常 0.3 秒内就
+        渲染完，而固定睡 3 秒是常态浪费。
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                if self.evaluate(expression):
+                    return True
+            except CDPError:
+                pass
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(poll)
+
+    def wait_for_selector(self, selector: str, timeout: float = 10.0, *, poll: float = 0.15) -> bool:
+        """等某个元素出现。超时返回 False（不抛异常，交给调用方决定）。"""
+        return self.wait_until(
+            "!!document.querySelector(%s)" % json.dumps(selector),
+            timeout=timeout,
+            poll=poll,
+        )
+
     # ---------- 取值 ----------
 
     def evaluate(self, expression: str, timeout: float | None = None) -> Any:

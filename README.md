@@ -197,7 +197,8 @@ python scripts/browser_check.py
 
 ### Android / Termux
 
-Termux 是明确支持的目标平台。装依赖：
+Termux 是明确支持的目标平台：**浏览器照样由本服务自己拉起、界面上看不见，
+不需要动你手机上的浏览器，也不需要 adb 转发。**
 
 ```bash
 pkg install tur-repo x11-repo
@@ -205,15 +206,24 @@ pkg install chromium xorg-server-xvfb python
 pip install hltv-mcp
 ```
 
-三点说明：
+几个容易踩的点：
 
-* **Chromium 的可执行文件叫 `chromium-browser`**，不是 `chromium`。本项目会自动找到它。
-* **`xorg-server-xvfb` 是必须的** —— 没有它就只能退化成无头模式，而无头会被 Cloudflare 拦。
-* 启动时自动带上 Android 需要的 `--no-sandbox`（Android 上 setuid 沙箱不可用）。
+* **Chromium 不在官方 main 源里**，它在 TUR（`tur-repo`），并且依赖 `x11-repo`
+  里的 GTK/X11 库（即使跑无头也会链接这些库）。但注意：`tur-repo` 和 `x11-repo`
+  这两个**「启用源」的包本身就在 main 源里** —— 所以只要官方源可用就够了，
+  不需要任何第三方源。反过来，如果 `pkg install chromium` 报找不到包，
+  先确认这两条 `pkg install tur-repo x11-repo` 执行成功了。
+* **Chromium 的可执行文件叫 `chromium-browser`**，不是 `chromium`。本项目会自动找到它
+  （`$PREFIX/bin/chromium-browser`）。
+* **`xorg-server-xvfb` 是必须的** —— 它就是"界面上看不见"的实现方式：浏览器有头运行，
+  但没有显示设备。没有它就只能退化成无头模式，而无头会被 Cloudflare 拦。
+* 启动时自动带上 Android 需要的 `--no-sandbox`（Android 上 setuid 沙箱不可用）和 `--disable-gpu`。
+* Termux 把临时目录放在 `$TMPDIR`（`/data/data/com.termux/files/usr/tmp`）而不是 `/tmp`，
+  X11 的 socket 也跟着在那里 —— 本项目会在这三处一起找。
 
 `playwright` 在这里是**装不起来**的 —— 官方直接抛 `Unsupported platform: android`，
-Python 版也没有 Termux 的 wheel。所以本项目不用它，而是用自带的原生 CDP 客户端
-（只需要纯 Python 的 `websocket-client`）。
+而且它的 `new_page()` 一定会抢焦点。所以本项目不用它，改用自带的原生 CDP 客户端
+（只需纯 Python 的 `websocket-client`）。
 
 独立 profile 不是随便选的：一是避免拿你日常的浏览数据去开调试端口，二是 Chrome 在同
 profile 已有实例运行时，新进程只会把标签页塞进旧实例、调试端口根本不会打开。它还有个

@@ -214,6 +214,36 @@ def _task_spawn(args, **kwargs):
     return subprocess.Popen(args, **kwargs)  # noqa: S603 - 路径来自本机探测或用户显式指定
 
 
+def _x_socket_dirs() -> list[Path]:
+    """X11 socket 可能出现的位置。
+
+    **不能只认 `/tmp/.X11-unix`** —— Termux（Android）把临时目录放在自己的
+    `TMPDIR` 下（`/data/data/com.termux/files/usr/tmp`），Xvfb 的 socket 也就
+    跟着落在那里。只查 /tmp 会让真机上的虚拟显示「明明起来了却被判成失败」，
+    然后白白退回「窗口移出屏幕」那种次优方案。
+    """
+    dirs: list[Path] = [Path("/tmp/.X11-unix")]
+    tmpdir = os.environ.get("TMPDIR")
+    if tmpdir:
+        dirs.append(Path(tmpdir) / ".X11-unix")
+    prefix = os.environ.get("PREFIX")
+    if prefix:
+        dirs.append(Path(prefix) / "tmp" / ".X11-unix")
+    return dirs
+
+
+def _x_socket_path(number: int) -> Path | None:
+    """找到某个显示号的 X socket，找不到返回 None。"""
+    for directory in _x_socket_dirs():
+        candidate = directory / f"X{number}"
+        try:
+            if candidate.exists():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
 def _display_ok(display: str) -> bool:
     """`DISPLAY` 里写的那个显示是否真的可用。
 
@@ -223,7 +253,7 @@ def _display_ok(display: str) -> bool:
     if not display:
         return False
     if display.startswith(":") and display[1:].split(".")[0].isdigit():
-        return Path(f"/tmp/.X11-unix/X{display[1:].split('.')[0]}").exists()
+        return _x_socket_path(int(display[1:].split(".")[0])) is not None
     if display.startswith("localhost:") or display[0].isdigit():
         # 远程 X（host:0）无法用文件判断，交给启动失败重试兜底
         return True
@@ -261,7 +291,7 @@ class _VirtualDisplay:
 
         for number in range(99, 120):
             display = f":{number}"
-            if Path(f"/tmp/.X11-unix/X{number}").exists():
+            if _x_socket_path(number) is not None:
                 continue
             proc = _task_spawn(
                 [binary, display, "-screen", "0", "1440x900x24", "-nolisten", "tcp"],
@@ -272,14 +302,26 @@ class _VirtualDisplay:
             )
             # 等 socket 出现，最多 10 秒
             deadline = time.monotonic() + 10
+            ready = False
             while time.monotonic() < deadline:
-                if Path(f"/tmp/.X11-unix/X{number}").exists():
-                    self._process = proc
-                    self.display = display
-                    return display
-                if proc.poll() is not None:
+                if _x_socket_path(number) is not None:
+                    ready = True
                     break
+                if proc.poll() is not None:
+                    break  # 进程已退出，启动失败
                 time.sleep(0.2)
+
+            if not ready and proc.poll() is None:
+                # socket 没在已知位置出现，但进程活得好好的 —— 很可能只是
+                # socket 落在我们没枚举到的目录里。X 客户端按同样的规则找
+                # socket，所以仍然可用，没有理由把它判成失败。
+                ready = True
+
+            if ready:
+                self._process = proc
+                self.display = display
+                return display
+
             try:
                 proc.kill()
             except Exception:  # noqa: BLE001

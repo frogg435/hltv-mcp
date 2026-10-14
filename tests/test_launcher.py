@@ -85,6 +85,33 @@ def main() -> int:
             except OSError:
                 pass
 
+    # Termux 把临时目录放在 $TMPDIR 而不是 /tmp，X socket 也跟着在那里。
+    # 只查 /tmp 会在真机上把「已经起来的虚拟显示」误判成失败。
+    import tempfile  # noqa: PLC0415
+
+    saved_env = {k: os.environ.get(k) for k in ("TMPDIR", "PREFIX")}
+    with tempfile.TemporaryDirectory() as tmp:
+        sock_dir = os.path.join(tmp, ".X11-unix")
+        os.makedirs(sock_dir, exist_ok=True)
+        open(os.path.join(sock_dir, "X77"), "w").close()
+        os.environ["TMPDIR"] = tmp
+        try:
+            check("能识别 TMPDIR 下的 X socket",
+                  L._x_socket_path(77) is not None, True)
+            check("DISPLAY 指向 TMPDIR 下的 socket 时判定可用",
+                  L._display_ok(":77"), True)
+            check("TMPDIR 参与候选目录",
+                  any(str(tmp) in str(d) for d in L._x_socket_dirs()), True)
+        finally:
+            for k, v in saved_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    check("候选目录始终含 /tmp/.X11-unix",
+          any(str(d) == "/tmp/.X11-unix" for d in L._x_socket_dirs()), True)
+
     print("\n--- 3. CDP 端点探测 ---")
     url, stop = _serve_cdp(b'{"Browser": "Chrome/999", "webSocketDebuggerUrl": "ws://x"}')
     try:

@@ -283,6 +283,54 @@ MATCH_PAGE_FIXTURE = """
 """
 
 
+# ---- 实时比分（/livescore）----
+LIVE_FIXTURE = """
+<a class="hotmatch-box a-reset" data-livescore-match="2399256"
+   href="/matches/2399256/aaa-vs-bbb-some-event"
+   title="Two top 30 teams, playing - Some Event">
+  <div class="teambox match" team1="11581" team2="6665" lan="true" stars="1">
+    <div class="teamrows">
+      <div class="teamrow"><img class="flag" title="Russia"/><span class="team">HOTU</span></div>
+      <div class="teamrow"><img class="flag" title="Europe"/><span class="team">Astralis</span></div>
+    </div>
+    <div class="twoRowExtra">
+      <div class="livescore">
+        <span class="trailing" data-livescore-current-map-score="7" data-livescore-team="11581">7</span>
+        <span class="spacing">(</span>
+        <span class="leading" data-livescore-maps-won-for="" data-livescore-team="11581">1</span>
+        <span class="spacing">)</span>
+      </div>
+      <div class="livescore">
+        <span class="leading" data-livescore-current-map-score="7" data-livescore-team="6665">7</span>
+        <span class="spacing">(</span>
+        <span class="trailing" data-livescore-maps-won-for="" data-livescore-team="6665">0</span>
+        <span class="spacing">)</span>
+      </div>
+    </div>
+  </div>
+</a>
+<a class="hotmatch-box" data-livescore-match="2399559"
+   href="/matches/2399559/ccc-vs-ddd-qual" title="Qualifier - PGL Open">
+  <div class="teambox match" team1="9" team2="8" lan="false" stars="0">
+    <div class="teamrows">
+      <div class="teamrow"><span class="team">CCC</span></div>
+      <div class="teamrow"><span class="team">DDD</span></div>
+    </div>
+    <div class="twoRowExtra">
+      <div class="livescore">
+        <span data-livescore-current-map-score="-" data-livescore-team="9">-</span>
+        <span data-livescore-maps-won-for="" data-livescore-team="9">0</span>
+      </div>
+      <div class="livescore">
+        <span data-livescore-current-map-score="1" data-livescore-team="8">1</span>
+        <span data-livescore-maps-won-for="" data-livescore-team="8">0</span>
+      </div>
+    </div>
+  </div>
+</a>
+"""
+
+
 def parse(soup):
     return P.parse_player_career(soup)
 
@@ -446,6 +494,27 @@ def main() -> int:
     check("只用 totalstats，隐藏的阵营表被忽略", len(stats["All maps"]), 2)
     check("第二张地图独立解析", stats["Dust2"][0]["team"], "Beta")
     check("第二张地图的选手", [p["nickname"] for p in stats["Dust2"][0]["players"]], ["CCC"])
+
+    # ---- 实时比分 ----
+    live = P.parse_live_scores(BeautifulSoup(LIVE_FIXTURE, "lxml"))
+    check("live 场次数", len(live), 2)
+    m = live[0]
+    check("match_id 取自 data 属性", m["match_id"], 2399256)
+    check("赛事名取自 title 尾段", m["event"], "Some Event")
+    check("LAN 标记", m["lan"], True)
+    check("队1 名", m["team1"]["name"], "HOTU")
+    check("队1 id", m["team1"]["team_id"], 11581)
+    check("队1 国旗", m["team1"]["country"], "Russia")
+    check("队1 当前图回合", m["team1"]["current_map_rounds"], "7")
+    check("队1 已赢图", m["team1"]["maps_won"], "1")
+    check("队2 当前图回合", m["team2"]["current_map_rounds"], "7")
+    check("队2 已赢图", m["team2"]["maps_won"], "0")
+    # 比分要按 data-livescore-team 对应，不能按出现顺序
+    check("比分与队伍对应（不因 trailing/leading 类名错位）",
+          (m["team1"]["maps_won"], m["team2"]["maps_won"]), ("1", "0"))
+    m2 = live[1]
+    check("刚开局回合为 - 时归一为 None", m2["team1"]["current_map_rounds"], None)
+    check("无国旗时不报错", m2["team1"]["country"], None)
 
     print()
     if failures:

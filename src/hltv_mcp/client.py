@@ -128,6 +128,7 @@ class HltvClient:
         # 不同页面变化频率不同，缓存 TTL 分开配置（秒）
         self.cache_ttl = cache_ttl or {
             "matches": 60,      # 赛程变动快
+            "live": 15,         # 实时比分：够新，又不至于把 HLTV 打爆
             "results": 120,
             "news": 300,
             "ranking": 3600,
@@ -193,6 +194,8 @@ class HltvClient:
     @staticmethod
     def _cache_bucket(path: str) -> str:
         p = path.lower()
+        if p.startswith("/livescore"):
+            return "live"
         if p.startswith("/matches") and "results" not in p:
             return "matches"
         if p.startswith("/results"):

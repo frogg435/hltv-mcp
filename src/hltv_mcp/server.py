@@ -26,7 +26,7 @@ MAX_LIMIT = 100
 server = MCPServer(
     name="hltv",
     title="HLTV.org",
-    version="1.2.0",
+    version="1.3.0",
     instructions=(
         "查询 HLTV.org 的 Counter-Strike 赛事数据：赛程、赛果、世界排名、战队、选手、"
         "新闻与赛事日历。所有工具都接受数字 id 或名称（如 \"Vitality\"、\"ZywOo\"），"
@@ -688,6 +688,40 @@ def hltv_backend_status(check_pages: bool = False) -> str:
         info["page_checks"] = checks
 
     return _dump(info)
+
+
+@server.tool(
+    name="hltv_get_live_scores",
+    description=(
+        "获取**正在进行的比赛**的实时比分快照：当前地图的回合数、已赢地图数、"
+        "双方队伍与赛事。想追踪某场比分的变化就间隔调用（内部有 15 秒缓存，"
+        "防止打爆 HLTV）。可按 match_id 过滤只看一场。"
+    ),
+)
+def hltv_get_live_scores(match_id: int | None = None, limit: int = 30) -> str:
+    """
+    Args:
+        match_id: 只返回这一场比赛的实时比分（省略则返回全部正在进行的比赛）。
+        limit: 返回条数上限，默认 30。
+
+    说明：这是**快照**语义 —— 每次调用返回调用那一刻的比分。MCP 工具没有
+    常驻连接，所以「实时」靠轮询：想看进展就隔十几秒再调一次。比分来自
+    /livescore 页面，该页在浏览器里由 HLTV 自己实时刷新，我们每次取的是
+    最新渲染结果。
+    """
+    try:
+        rows = P.parse_live_scores(get_client().fetch_soup("/livescore"))
+        if match_id is not None:
+            rows = [r for r in rows if r.get("match_id") == int(match_id)]
+        return _dump(
+            {
+                "count": len(rows),
+                "live": rows[:_clamp(limit, 30)],
+                "note": "快照数据；持续追踪请间隔十几秒再次调用",
+            }
+        )
+    except HltvError as exc:
+        return _dump({"error": str(exc)})
 
 
 def main() -> None:

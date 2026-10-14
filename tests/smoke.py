@@ -38,6 +38,7 @@ CASES: list[tuple[str, str, dict]] = [
     ("teammatch", "hltv_get_team_matches", {"name": "FaZe", "limit": 5}),
     ("h2h", "hltv_get_head_to_head", {"team1": "FaZe", "team2": "Vitality", "limit": 5}),
     ("matchstats", "hltv_get_match_stats", {"match_id": 2399253, "map": "Inferno", "side": "ct"}),
+    ("live", "hltv_get_live_scores", {}),
     ("backend", "hltv_backend_status", {}),
     ("news", "hltv_get_news", {"limit": 5}),
     ("events", "hltv_get_events", {"limit": 5}),
@@ -81,6 +82,8 @@ def main() -> int:
             ok = payload["summary"].get("maps_played", 0) > 0
         elif "sides" in payload and "results" in payload:
             ok = any(r.get("sides") for r in payload["results"])
+        elif "live" in payload:
+            ok = True  # 没有比赛进行时 count=0 也是正常结果
         elif "backend_in_use" in payload:
             ok = payload.get("backend_in_use") in ("browser", "http")
         elif "seasons" in payload:
@@ -117,6 +120,12 @@ def main() -> int:
         elif payload.get("by_map"):
             detail = (f"{payload['summary']['maps_played']} 图 "
                       f"{payload['summary']['maps_won']}胜{payload['summary']['maps_lost']}负")
+        elif "live" in payload:
+            n = len(payload["live"])
+            ex = next((f"{x['team1']['name']} {x['team1']['current_map_rounds']}:"
+                       f"{x['team2']['current_map_rounds']} {x['team2']['name']}"
+                       for x in payload["live"][:1]), "")
+            detail = f"{n} 场进行中，例: {ex}"
         elif "backend_in_use" in payload:
             detail = f"{payload.get('backend_in_use')} / 浏览器={payload.get('browser_version') or '未连接'}"
         elif payload.get("seasons"):

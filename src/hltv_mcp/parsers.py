@@ -308,6 +308,90 @@ def parse_match_page_stats(
     return result
 
 
+# --------------------------- 实时比分（/livescore） ---------------------------
+
+def parse_live_scores(soup: BeautifulSoup) -> list[dict[str, Any]]:
+    """解析 /livescore 页面上正在进行的比赛及其实时比分。
+
+    结构要点（实测）：
+      · 每场是一个 `a.hotmatch-box`，其 `data-livescore-match` 就是比赛 ID。
+      · 队伍 id 在内层 `.teambox` 的 `team1` / `team2` 属性上；
+        `.teamrow` 的顺序与 team1/team2 一致。
+      · 比分在 `.livescore` 里，靠 `data-livescore-team` 与队伍对应：
+          - `[data-livescore-current-map-score]` —— 当前地图的回合数
+          - `[data-livescore-maps-won-for]`       —— 已赢下的地图数
+        （trailing / leading 只是左右对齐用的 CSS 类，与谁领先无关）
+      · 赛事名在链接的 `title` 里，形如「说明文字 - 赛事名」。
+    """
+    live: list[dict[str, Any]] = []
+
+    for box in soup.select("a.hotmatch-box[data-livescore-match]"):
+        teambox = box.select_one(".teambox")
+        if teambox is None:
+            continue
+
+        team_ids = [teambox.get("team1"), teambox.get("team2")]
+        rows = box.select(".teamrow")
+        if len(rows) < 2:
+            continue
+
+        # 比分按队 id 索引
+        by_team: dict[str, dict[str, Any]] = {}
+        for cell in box.select(".livescore"):
+            tid = None
+            cur = cell.select_one("[data-livescore-current-map-score]")
+            won = cell.select_one("[data-livescore-maps-won-for]")
+            for node in (cur, won):
+                if node is not None and node.get("data-livescore-team"):
+                    tid = node.get("data-livescore-team")
+                    break
+            if tid is None:
+                continue
+
+            def _score_of(node, attr):
+                # 刚开局的比赛这里的值可能是 "-"，归一成 None
+                raw = (node.get(attr) if node is not None else None) or _clean_text(node)
+                return None if raw in (None, "", "-") else raw
+
+            by_team[tid] = {
+                "current_map_rounds": _score_of(cur, "data-livescore-current-map-score"),
+                "maps_won": _score_of(won, None),
+            }
+
+        sides: list[dict[str, Any]] = []
+        for index, row in enumerate(rows[:2]):
+            flag = row.select_one("img.flag")
+            team_id = _int(team_ids[index]) if index < len(team_ids) else None
+            score = by_team.get(str(team_id) if team_id else "", {})
+            sides.append(
+                {
+                    "team_id": team_id,
+                    "name": _clean_text(row.select_one(".team")),
+                    "country": (flag.get("title") or flag.get("alt")) if flag else None,
+                    "current_map_rounds": score.get("current_map_rounds"),
+                    "maps_won": score.get("maps_won"),
+                }
+            )
+
+        title = box.get("title") or ""
+        match_id = _int(box.get("data-livescore-match"))
+
+        live.append(
+            {
+                "match_id": match_id,
+                "url": _abs(box.get("href")),
+                "event": title.split(" - ")[-1].strip() or None,
+                "note": title or None,
+                "lan": (teambox.get("lan") or "").lower() == "true",
+                "stars": _int(teambox.get("stars")),
+                "team1": sides[0],
+                "team2": sides[1],
+            }
+        )
+
+    return live
+
+
 # --------------------------- 排位 ---------------------------
 
 def parse_team_ranking(soup: BeautifulSoup) -> list[dict[str, Any]]:

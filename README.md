@@ -11,6 +11,7 @@
 |---|---|
 | 今天有哪些比赛？ | `hltv_get_matches` |
 | 现在正在打的有哪些？ | `hltv_get_matches(live_only=True)` |
+| **现在比分多少？** | **`hltv_get_live_scores()`** |
 | Vitality 最近战绩如何？ | `hltv_get_results(team="Vitality")` |
 | 现在世界排名前 30 是谁？ | `hltv_get_team_ranking` |
 | ZywOo 的 Rating 和生涯荣誉？ | `hltv_get_player(name="ZywOo")` |
@@ -89,6 +90,7 @@ python3 -m venv .venv
 |---|---|
 | `hltv_search` | 搜索选手/战队/赛事/新闻，名称 → ID |
 | `hltv_get_matches` | 赛程（即将开始 + 进行中），支持按队伍/赛事过滤、只看直播 |
+| `hltv_get_live_scores` | **实时比分快照**：正在进行的比赛、当前地图回合数、已赢地图数（轮询获取进展）|
 | `hltv_get_results` | 赛果，含比分与胜方，支持分页 |
 | `hltv_get_match` | 单场详情：地图比分 + **逐地图分队伍的选手数据**（昵称、选手 ID、国籍、K-D、ADR、KAST、Rating、Swing）|
 | `hltv_get_team_ranking` | 世界战队排名（含积分） |

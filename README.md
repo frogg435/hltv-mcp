@@ -43,6 +43,12 @@ python3 -m venv .venv
 用来提供「界面上看不见」的虚拟显示。装不了浏览器（比如 CI）就改用 HTTP 后端：
 `pip install -e ".[http]"` 并设置 `HLTV_BACKEND=http`。
 
+想让 `hltv_visualize_match` 直接产出 PNG，再装一个可选的转换器（不装就只能给 SVG）：
+
+```bash
+pip install -e ".[viz]"     # 等价于 pip install cairosvg
+```
+
 ## 接入 MCP 客户端
 
 在客户端的 MCP 配置里加上：
@@ -111,6 +117,7 @@ python3 -m venv .venv
 | `hltv_get_news_article` | 新闻正文 |
 | `hltv_get_events` | 赛事日历 |
 | `hltv_backend_status` | 当前用哪种后端、浏览器是否可用；排查「查不到数据」时先调它 |
+| `hltv_visualize_match` | **数据可视化**：把某场选手数据画成六边形面板图（K/D、Rating、KAST、Swing、ADR、爆头率）与柱状图，产出 SVG / PNG / HTML |
 
 全部只读，没有任何写操作。
 
@@ -335,6 +342,50 @@ python scripts/health.py          # HTTP 后端：定位是 IP 级封禁还是�
 * **比赛页的 "Detailed stats" 指向另一套 ID。** 比赛页是 `/matches/{id}`，
   统计页是 `/stats/matches/{另一个id}`，两者不通用，得先从比赛页里取出来。
 
+### 数据可视化
+
+`hltv_visualize_match` 把一场比赛的选手数据直接画成图，两种图各管一件事：
+
+| 图 | 看什么 |
+|---|---|
+| **六边形面板图** | 六个轴 = K/D、Rating、KAST、Swing、ADR、爆头率。多位选手叠在一起，看的是**强弱结构**——谁在哪几个维度上撑开了 |
+| **柱状图** | 同样的六个指标，按指标分组，每组内每人一根柱子。柱顶标的是**原始数值**，纵轴是归一化后的相对高度 |
+
+```jsonc
+// hltv_visualize_match(match_id=2399385, map="Ancient", side="both",
+//                      players="m0NESY,NiKo", chart="both", format="all")
+{
+  "players": [{"nickname": "m0NESY", "team": "Falcons",
+               "kd": 1.73, "rating": 1.64, "kast": 69.0,
+               "swing": 7.46, "adr": 93.9, "hs": 34.62}],
+  "files": {
+    "svg":  "/path/hltv-2399385-Ancient-both-20261014-232106.svg",
+    "png":  "/path/hltv-2399385-Ancient-both-20261014-232106.png",
+    "html": "/path/hltv-2399385-Ancient-both-20261014-232106.html"
+  }
+}
+```
+
+输出三种格式，`format` 默认 `svg`：
+
+| 格式 | 什么时候用 |
+|---|---|
+| `svg`（默认） | 矢量、纯文本，能无损缩放，也能随手改 |
+| `png` | 贴进聊天窗口、文档、IM 最方便 |
+| `html` | 双击直接看，外面套了一层卡片样式 |
+| `all` | 三种都要 |
+
+PNG 需要一个转换器，按 `cairosvg` → `rsvg-convert` → ImageMagick `convert` 的顺序找；
+**三条路都不通时只产出 SVG，不算失败**（`notes` 里会说明原因）。
+
+**关于「归一化」**：六个指标量纲差得远 —— Rating 是 0.5–2 的比值，ADR 是几十到一百多，
+Swing 还带正负号 —— 画进同一个坐标系必须先映射到 0–1，参考区间写在
+`src/hltv_mcp/viz.py` 的 `METRICS` 里。所以**图上的形状只用来横向比强弱，真实数值一律
+照原样标出来**：柱顶写的是原始值，雷达图下方也逐条列出了每个轴用的区间。
+
+> 爆头率不在 HLTV 的表格里，是**算出来的**：表里给的是 `eK (hs)`（击杀数（爆头数）），
+> 所以 HS% = hs / kills。
+
 ### 关于 `/stats/*` 与逐年 Rating
 
 `/stats/*` 路径（含**逐年 Rating** 所在的统计页）在 HTTP 后端下会被 Cloudflare 拦截。
@@ -431,6 +482,7 @@ python scripts/hltv_inspect.py /team/6667/x --selector .profile-team-stat
 | `HLTV_CHALLENGE_WAIT` | `25` | 等 Cloudflare 挑战通过的上限（秒） |
 | `HLTV_CHALLENGE_POLL` | `0.6` | 挑战轮询间隔（秒） |
 | `HLTV_BLOCK_ASSETS` | `0` | 置 `1` 拦掉图片/字体/广告统计脚本。实测 HLTV 以服务端渲染的 HTML 为主，桌面端开了反而略慢；弱设备可以自己试 |
+| `HLTV_VIZ_DIR` | 缓存目录 `/charts` | `hltv_visualize_match` 产出图片的目录 |
 | `HLTV_IMPERSONATE` | `safari17_0` | HTTP 后端的 TLS 指纹，可选 `chrome131`、`firefox135` 等 |
 
 也识别标准的 `HTTPS_PROXY` / `ALL_PROXY`。

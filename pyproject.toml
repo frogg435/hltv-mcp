@@ -1,6 +1,6 @@
 [project]
 name = "hltv-mcp"
-version = "1.4.0"
+version = "1.5.0"
 description = "HLTV.org MCP —— 让 AI 直接查询 CS 赛程、赛果、排名、战队、选手与新闻"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,9 +18,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# HTTP-only 部署：不想装 playwright 时用，配合 HLTV_BACKEND=http
+# HTTP-only 部署：不想装浏览器时用，配合 HLTV_BACKEND=http
 # 安装：pip install -e ".[http]" 然后设置 HLTV_BACKEND=http
 http = ["curl_cffi>=0.7"]
+
+# 让 hltv_visualize_match 能直接把 SVG 转成 PNG。
+# 不装也能用 —— 只是产出的文件里没有 png 那一份，svg / html 照常。
+# 安装：pip install -e ".[viz]"
+viz = ["cairosvg>=2.7"]
 
 [project.scripts]
 hltv-mcp = "hltv_mcp.server:main"

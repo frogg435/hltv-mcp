@@ -27,6 +27,9 @@
 
 **所有工具都接受 ID 或名称** —— 直接写 `name="Vitality"` 就行，服务端会自动解析成 ID，不需要模型先查一遍搜索。
 
+> 只想**飞快地看一眼当前比分**？仓库里带了 `python scripts/hltv-live` —— 不经浏览器直连 HLTV，
+> 1~2 秒出结果，见下文「[极速实时比分](#极速实时比分scripts-hltv-live)」。
+
 ## 安装
 
 ```bash
@@ -435,6 +438,24 @@ python scripts/hltv_inspect.py /team/6667/x --selector .profile-team-stat
 
 也识别标准的 `HTTPS_PROXY` / `ALL_PROXY`。
 
+## 极速实时比分：`scripts/hltv-live`
+
+MCP 里的 `hltv_get_live_scores` 走浏览器后端，准确但代价是等浏览器渲染。只想快速瞄一眼比分时，
+用仓库自带的脚本更划算 —— 它直接请求 `https://www.hltv.org/scores`（这条路径不受 Cloudflare
+拦截，被拦的是 `/matches/*` 那类页面；gzip 后约 40KB），完全不启动浏览器：
+
+```bash
+python scripts/hltv-live             # 列出当前所有进行中的比赛（约 1.5~2.5 秒）
+python scripts/hltv-live falcons     # 只筛队名含 falcons 的（可多个关键字）
+python scripts/hltv-live --json      # JSON 输出
+python scripts/hltv-live --watch 15  # 守护模式：每 15 秒轮询一次并写缓存
+python scripts/hltv-live --cache     # 读守护进程缓存，毫秒级（不联网）
+```
+
+实测（Android/Termux，同一场比赛）：直连脚本 1.6~2.4 秒，守护模式缓存读取约 60 毫秒，
+比分与页面同步；相比之下浏览器后端冷启动要几十秒。脚本同样只读公开页面，
+请保持合理的轮询间隔（守护模式默认 15 秒）。
+
 ## 诊断与测试
 
 ```bash
@@ -442,6 +463,7 @@ python scripts/browser_check.py       # 默认后端：浏览器能否连接、�
 python scripts/health.py              # HTTP 后端：区分 IP 级 / 路径级封锁
 python scripts/health.py --json
 python scripts/hltv_inspect.py /matches   # 页面结构 dump，改版时用来定位新选择器
+python scripts/hltv-live --watch 15       # 极速实时比分（守护模式，写缓存）
 
 python tests/test_parsers.py          # 离线：解析逻辑
 python tests/test_launcher.py         # 离线：后端选择、显示环境、Termux 识别、CDP 探测

@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""hltv-live — 极速实时比分（直连 HLTV /scores，不走浏览器后端）。
+
+和 MCP 的 hltv_get_live_scores 相比：
+  · MCP 走 Chromium 后端：冷启动几十秒，且浏览器渲染 + 缓存链路让数据略滞后。
+  · 这里直接 GET https://www.hltv.org/scores —— 该路径不受 Cloudflare 拦截
+    （被拦的是 /matches/* 之类的页面），gzip 后约 40KB，1.5~2.5s 出结果，
+    与页面上的实时比分同步。守护模式缓存后读取约 60ms。
+
+用法：
+  scripts/hltv-live               列出所有进行中的比赛
+  scripts/hltv-live falcons       只筛队名含 falcons 的（不区分大小写，可多个关键字）
+  scripts/hltv-live --json        输出 JSON
+  scripts/hltv-live --cache       读守护进程缓存（毫秒级，不联网）
+  scripts/hltv-live --watch [秒]  守护模式：每 N 秒轮询并写缓存（默认 15）
+
+环境变量：
+  HLTV_LIVE_CACHE  缓存文件路径（默认 $XDG_CACHE_HOME/hltv-live/latest.json，
+                   再退回 ~/.cache/hltv-live/latest.json）
+"""
+from __future__ import annotations
+
+import gzip
+import http.client
+import json
+import os
+import re
+import sys
+import time
+
+HOST = "www.hltv.org"
+SCORES_PATH = "/scores"
+UA = ("Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/155.0.0.0 Mobile Safari/537.36")
+
+
+def default_cache() -> str:
+    if os.environ.get("HLTV_LIVE_CACHE"):
+        return os.environ["HLTV_LIVE_CACHE"]
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+    return os.path.join(base, "hltv-live", "latest.json")
+
+
+CACHE = default_cache()
+
+_MARK = re.compile(r'data-livescore-match="(\d+)"')
+_SCORE = re.compile(
+    r'data-livescore-current-map-score="(\d+)" data-livescore-team="(\d+)"[^>]*class="([^"]*)"')
+_MAPS = re.compile(r'data-livescore-maps-won-for="" data-livescore-team="(\d+)">(\d+)<')
+_TEAM = re.compile(r'<span class="team">([^<]+)</span>')
+
+
+def fetch_scores(holder: dict) -> str:
+    """取 /scores 页面。HLTV 会回 HTTP 404 但正文是正常内容，别当错误。"""
+    last = None
+    for _ in range(2):
+        try:
+            conn = holder.get("conn")
+            if conn is None:
+                conn = http.client.HTTPSConnection(HOST, timeout=12)
+                holder["conn"] = conn
+            conn.request("GET", SCORES_PATH, headers={
+                "User-Agent": UA,
+                "Accept": "text/html,application/xhtml+xml",
+                "Accept-Encoding": "gzip",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "Connection": "keep-alive",
+            })
+            resp = conn.getresponse()
+            body = resp.read()
+            if resp.getheader("Content-Encoding") == "gzip":
+                body = gzip.decompress(body)
+            return body.decode("utf-8", "ignore")
+        except Exception as exc:  # 连接坏了就重开再试一次
+            last = exc
+            try:
+                holder["conn"].close()
+            except Exception:
+                pass
+            holder["conn"] = None
+            time.sleep(0.4)
+    raise SystemExit(f"抓取失败：{last}")
+
+
+def parse_matches(html: str) -> list[dict]:
+    marks = [m.start() for m in _MARK.finditer(html)]
+    out = []
+    for n, start in enumerate(marks):
+        end = marks[n + 1] if n + 1 < len(marks) else start + 4000
+        block = html[start:end]
+        mid = _MARK.match(block).group(1)
+        head = html[max(0, start - 700):start]
+        href = re.search(r'href="(/matches/[^"]+)"', head)
+        title = re.search(r'<a href="/matches/[^"]+"[^>]*title="([^"]*)"', head)
+        teams = _TEAM.findall(block)
+        scores = _SCORE.findall(block)
+        maps = dict(_MAPS.findall(block))
+        if len(teams) < 2 or len(scores) < 2:
+            continue
+        (s1, t1, _c1), (s2, t2, _c2) = scores[0], scores[1]
+        out.append({
+            "match_id": int(mid),
+            "url": "https://www.hltv.org" + href.group(1) if href else None,
+            "note": title.group(1) if title else "",
+            "team1": {"name": teams[0].strip(), "score": int(s1),
+                      "maps": int(maps[t1]) if t1 in maps else None},
+            "team2": {"name": teams[1].strip(), "score": int(s2),
+                      "maps": int(maps[t2]) if t2 in maps else None},
+        })
+    return out
+
+
+def fmt(m: dict) -> str:
+    a, b = m["team1"], m["team2"]
+    lead = "→" if a["score"] > b["score"] else ("←" if b["score"] > a["score"] else "·")
+    ma = "-" if a["maps"] is None else a["maps"]
+    mb = "-" if b["maps"] is None else b["maps"]
+    return f"{a['name']} {a['score']} ({ma}图) {lead} {b['name']} {b['score']} ({mb}图)"
+
+
+def pick(ms: list[dict], filters: list[str]) -> list[dict]:
+    if not filters:
+        return ms
+    return [m for m in ms
+            if all(f in (m["team1"]["name"] + " " + m["team2"]["name"] + " " + m["note"]).lower()
+                   for f in filters)]
+
+
+def show(ms: list[dict], filters: list[str], as_json: bool,
+         stamp: str | None = None, age: int | None = None) -> None:
+    if as_json:
+        print(json.dumps(ms, ensure_ascii=False, indent=2))
+        return
+    tag = ""
+    if stamp:
+        tag = f"[缓存 {stamp}" + (f"，{age}s 前]" if age is not None else "] ") + " "
+    target = pick(ms, filters)
+    if not target:
+        print(tag + "没有正在进行的匹配比赛")
+        return
+    for m in target:
+        print(tag + fmt(m))
+        if m["note"]:
+            print("   · " + m["note"].split(" - ")[-1])
+        if m["url"]:
+            print("   " + m["url"])
+
+
+def main(argv: list[str]) -> None:
+    args = argv[1:]
+    as_json = "--json" in args
+    filters = [a.lower() for a in args if not a.startswith("--") and not a.isdigit()]
+    watch = None
+    if "--watch" in args:
+        i = args.index("--watch")
+        watch = int(args[i + 1]) if i + 1 < len(args) and args[i + 1].isdigit() else 15
+
+    if "--cache" in args:
+        try:
+            with open(CACHE, encoding="utf-8") as f:
+                rec = json.load(f)
+        except Exception as exc:
+            raise SystemExit(f"没有缓存（先跑：hltv-live --watch 15）：{exc}")
+        show(rec["matches"], filters, as_json, stamp=rec.get("_iso"),
+             age=int(time.time() - rec.get("_ts", time.time())))
+        return
+
+    if watch:
+        os.makedirs(os.path.dirname(CACHE), exist_ok=True)
+        print(f"守护模式：每 {watch}s 轮询一次 → {CACHE}（Ctrl-C 退出）", flush=True)
+        holder: dict = {}
+        while True:
+            try:
+                ms = parse_matches(fetch_scores(holder))
+                rec = {"_ts": time.time(), "_iso": time.strftime("%H:%M:%S"), "matches": ms}
+                tmp = CACHE + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(rec, f, ensure_ascii=False)
+                os.replace(tmp, CACHE)
+                target = pick(ms, filters)
+                print(f"[{rec['_iso']}] " + (" | ".join(fmt(m) for m in target) or "无匹配比赛"),
+                      flush=True)
+            except Exception as exc:
+                print("轮询失败：", exc, flush=True)
+            time.sleep(watch)
+
+    show(parse_matches(fetch_scores({})), filters, as_json)
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv)
+    except KeyboardInterrupt:
+        pass

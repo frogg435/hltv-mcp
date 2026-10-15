@@ -141,6 +141,9 @@ def main() -> int:
         print("    · 出口 IP 被 Cloudflare 拦 —— 换网络出口，或设置 HLTV_PROXY")
         print("    · 用的是无头模式 —— 无头容易被拦，试着去掉 HLTV_BROWSER_HEADLESS")
         print("    · 浏览器里还没通过验证 —— 手动打开一次 hltv.org 通过后重试")
+        print("    · 首次冷启动偏慢 —— 部分出口过一次 Cloudflare 挑战要几十秒甚至更久，")
+        print("      默认上限只有 25s，可调大 HLTV_CHALLENGE_WAIT（如 120）后重试；")
+        print("      挑战通过后 cf_clearance 会落盘，后续启动走热路径就快了")
         print(f"\n  详细日志见 {LOG_FILE}")
         return 1
 

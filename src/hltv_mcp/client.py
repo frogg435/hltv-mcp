@@ -202,8 +202,9 @@ class HltvClient:
         except ImportError as exc:  # 没装可选依赖时给一句能自解释的报错
             raise HltvError(
                 "HTTP 后端依赖可选包 curl_cffi，当前未安装。"
-                "请执行 `pip install 'hltv-mcp[http]'`；"
-                "或直接使用默认的浏览器后端（HLTV_BACKEND=auto / browser）。"
+                "在项目目录内执行 `pip install -e '.[http]'` 即可补上；"
+                "或直接使用默认的浏览器后端（HLTV_BACKEND=auto / browser），"
+                "它不需要 curl_cffi。"
             ) from exc
         kwargs: dict[str, Any] = {"impersonate": IMPERSONATE}
         if PROXY:

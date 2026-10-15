@@ -26,7 +26,14 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from curl_cffi import requests as cr  # noqa: E402
+try:
+    from curl_cffi import requests as cr  # noqa: E402
+except ImportError:  # curl_cffi 是可选依赖，只有 HTTP 后端需要
+    sys.exit(
+        "health.py 诊断的是 HTTP 后端，需要可选依赖 curl_cffi。\n"
+        "  在项目目录内执行：pip install -e '.[http]'\n"
+        "  默认的浏览器后端不需要它 —— 那种情况请跑 scripts/browser_check.py。"
+    )
 
 from hltv_mcp.client import HLTV_BASE, IMPERSONATE, PROXY, DEFAULT_TIMEOUT  # noqa: E402
 

@@ -90,9 +90,18 @@ cd hltv-mcp-termux-offline
 bash install.sh
 ```
 
-包里已经放了全部 30 个 wheel（含 Android ARM64 版的 `pydantic_core`），安装时用
+包里已经放了全部 29 个 wheel（含 Android ARM64 版的 `pydantic_core`，以及 `pip install -e .` 需要的构建后端 `setuptools`），安装时用
 `--no-index` 强制只读本地文件，**完全不访问 PyPI**。详见
 [Releases](https://github.com/frogg435/hltv-mcp/releases) 页面的离线包说明。
+
+离线包的构建脚本也在仓库里（`termux/`）：`build-bundle.sh` 可在任意有网络的 Linux/macOS 上
+重新产出该包，采用可复现构建，相同输入两次构建的字节完全一致。
+
+脚本会同时给出可直接粘贴的 MCP 客户端配置，其中默认带上了 `HLTV_CHALLENGE_WAIT=120`：
+
+> 部分网络出口首次访问 HLTV 时，Cloudflare 挑战可能远超默认的 25 秒（实测中国联通出口约需 120 秒）。
+> 调大它可以避免首次查询直接超时；挑战一旦通过、`cf_clearance` 落盘，后续启动走热路径就很快了。
+> 桌面端如果首次就正常，不必改这个值。
 
 ### 接入 MCP 客户端
 
@@ -602,7 +611,13 @@ cd hltv-mcp-termux-offline
 bash install.sh
 ```
 
-The bundle already contains all 30 wheels (including the Android ARM64 build of `pydantic_core`), and installation uses `--no-index` so pip reads **only** local files and **never touches PyPI**. See the bundle notes on the [Releases](https://github.com/frogg435/hltv-mcp/releases) page.
+The bundle already contains all 29 wheels (including the Android ARM64 build of `pydantic_core`, plus the `setuptools` build backend that `pip install -e .` needs), and installation uses `--no-index` so pip reads **only** local files and **never touches PyPI**. See the bundle notes on the [Releases](https://github.com/frogg435/hltv-mcp/releases) page.
+
+The bundle's build script also lives in this repo (`termux/`): `build-bundle.sh` regenerates the bundle on any networked Linux/macOS machine, using a reproducible build — identical input produces byte-identical output.
+
+The script also prints a ready-to-paste MCP client config, which sets `HLTV_CHALLENGE_WAIT=120` by default:
+
+> On some network egresses the Cloudflare challenge on the first HLTV visit can take far longer than the 25-second default (measured at ~120 seconds on a China Unicom connection). Raising it avoids a first query timing out; once the challenge passes and `cf_clearance` is persisted, subsequent startups take the warm path and are fast. On desktop, if the first run works fine, there's no need to change this.
 
 ### Wiring it into an MCP client
 

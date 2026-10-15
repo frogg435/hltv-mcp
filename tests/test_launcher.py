@@ -206,7 +206,37 @@ def main() -> int:
             else:
                 os.environ[k] = v
 
-    print("\n--- 9. 默认在界面上不可见 ---")
+    print("\n--- 9. Termux (Android) 上也规划虚拟显示 ---")
+    # Termux 上 Python 3.13+ 的 sys.platform == "android"（不再是 "linux"）。
+    # 平台判断若只认 linux，会跳过 Xvfb 分支、退化成无头模式，而无头会被
+    # Cloudflare 拦 —— 见 README「Android / Termux」。
+    saved_start = L._VirtualDisplay.start
+    saved_platform = sys.platform
+    saved_termux = os.environ.get("TERMUX_VERSION")
+    saved_visible = os.environ.pop("HLTV_BROWSER_VISIBLE", None)
+    saved_headless = os.environ.pop("HLTV_BROWSER_HEADLESS", None)
+    L._VirtualDisplay.start = lambda self: ":99"  # 假装 Xvfb 可用
+    try:
+        os.environ["TERMUX_VERSION"] = "0.118.0"
+        sys.platform = "android"
+        plans = L.ChromeLauncher()._plan_attempts()
+        labels = " | ".join(p["label"] for p in plans)
+        check("Termux 上规划了 Xvfb 虚拟显示", "Xvfb" in labels, True)
+        check("Termux 首选有头 + 虚拟显示", "Xvfb" in plans[0]["label"], True)
+        check("Termux 不无头优先", plans[0]["headless"], False)
+    finally:
+        sys.platform = saved_platform
+        L._VirtualDisplay.start = saved_start
+        if saved_termux is None:
+            os.environ.pop("TERMUX_VERSION", None)
+        else:
+            os.environ["TERMUX_VERSION"] = saved_termux
+        if saved_visible is not None:
+            os.environ["HLTV_BROWSER_VISIBLE"] = saved_visible
+        if saved_headless is not None:
+            os.environ["HLTV_BROWSER_HEADLESS"] = saved_headless
+
+    print("\n--- 10. 默认在界面上不可见 ---")
     # 屏蔽真实的 Xvfb 启动，只验计划本身
     saved_start = L._VirtualDisplay.start
     L._VirtualDisplay.start = lambda self: None
@@ -237,7 +267,7 @@ def main() -> int:
         if saved_headless is not None:
             os.environ["HLTV_BROWSER_HEADLESS"] = saved_headless
 
-    print("\n--- 10. CDP 客户端的地址解析 ---")
+    print("\n--- 11. CDP 客户端的地址解析 ---")
     from hltv_mcp import cdp as Cdp  # noqa: PLC0415
 
     sock = socket.socket()
@@ -266,7 +296,7 @@ def main() -> int:
     finally:
         stop()
 
-    print("\n--- 11. profile 死锁自愈 ---")
+    print("\n--- 12. profile 死锁自愈 ---")
     # 场景：浏览器被 kill -9 之后，profile 里会留下指向「已经不存在的 pid」的
     # SingletonLock，此后 Chrome 每次启动都以退出码 21 秒退，浏览器后端永久
     # 起不来、悄悄降级到 HTTP。这里确认清理逻辑只在进程真的没了时才动手。

@@ -568,8 +568,11 @@ class ChromeLauncher:
             attempts.append({"headless": True, "display": None, "label": "无头模式"})
             return attempts
 
-        # 2. 默认：在 Linux 上建一个看不见的虚拟显示
-        if sys.platform.startswith("linux"):
+        # 2. 默认：在 Linux 上建一个看不见的虚拟显示。
+        # Termux（Android）同样适用：Xvfb 由 xorg-server-xvfb 提供，但
+        # Python 3.13+ 在 Termux 上 sys.platform == "android"，不能只看 linux，
+        # 否则会跳过这里、退化成会被 Cloudflare 拦的无头模式。
+        if sys.platform.startswith("linux") or _is_termux():
             if self._virtual_display is None:
                 self._virtual_display = _VirtualDisplay()
             display = self._virtual_display.start()

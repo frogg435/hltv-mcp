@@ -1,6 +1,6 @@
 [project]
 name = "hltv-mcp"
-version = "1.6.0"
+version = "1.0"
 description = "HLTV.org MCP —— 让 AI 直接查询 CS 赛程、赛果、排名、战队、选手与新闻"
 readme = "README.md"
 requires-python = ">=3.10"

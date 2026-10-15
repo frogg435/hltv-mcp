@@ -28,10 +28,15 @@ import random
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from curl_cffi import requests as cffi
 from bs4 import BeautifulSoup
+
+if TYPE_CHECKING:
+    # curl_cffi 只在 HTTP 后端用得到（见 _new_session）。
+    # 本模块有 `from __future__ import annotations`，所有注解都是惰性字符串，
+    # 因此把它降级为可选依赖后，类型标注依然可用、运行时却不必安装。
+    from curl_cffi import requests as cffi
 
 HLTV_BASE = "https://www.hltv.org"
 
@@ -192,10 +197,18 @@ class HltvClient:
     # ---------- 会话管理 ----------
 
     def _new_session(self) -> cffi.Session:
+        try:
+            from curl_cffi import requests as _cffi
+        except ImportError as exc:  # 没装可选依赖时给一句能自解释的报错
+            raise HltvError(
+                "HTTP 后端依赖可选包 curl_cffi，当前未安装。"
+                "请执行 `pip install 'hltv-mcp[http]'`；"
+                "或直接使用默认的浏览器后端（HLTV_BACKEND=auto / browser）。"
+            ) from exc
         kwargs: dict[str, Any] = {"impersonate": IMPERSONATE}
         if PROXY:
             kwargs["proxies"] = PROXY
-        session = cffi.Session(**kwargs)
+        session = _cffi.Session(**kwargs)
         # 预热：首页会下发 Cloudflare 相关 cookie，后续请求命中率明显更高
         try:
             session.get(HLTV_BASE + "/", timeout=self.timeout)

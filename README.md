@@ -1,11 +1,40 @@
+<div align="center">
+
 # hltv-mcp
+
+**让 AI 直接查询 HLTV.org 的 Counter-Strike 赛事数据**
+**Let AI query HLTV.org for Counter-Strike match data**
+
+赛程 · 赛果 · 实时比分 · 世界排名 · 战队 · 选手 · 赛事 · 新闻
+Matches · Results · Live scores · Rankings · Teams · Players · Events · News
+
+[**简体中文**](#简体中文) · [**English**](#english)
+
+</div>
+
+---
+
+<div align="center">
+
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Android-informational)
+![Tools](https://img.shields.io/badge/MCP%20tools-18-orange)
+
+</div>
+
+---
+
+<a id="简体中文"></a>
+
+## 简体中文
 
 让 AI 直接查询 **HLTV.org** 的 Counter-Strike 赛事数据 —— 赛程、赛果、世界排名、战队、选手、新闻、赛事日历。
 
 默认用**真实浏览器**取数据：**后台运行、界面上完全看不见**，也不会打扰你正在浏览的页面。
 支持 Windows / macOS / Linux，以及 **Android Termux**。
 
-## 它能回答什么
+### 它能回答什么
 
 | 提问 | 调用的工具 |
 |---|---|
@@ -30,7 +59,7 @@
 > 只想**飞快地看一眼当前比分**？仓库里带了 `python scripts/hltv-live` —— 不经浏览器直连 HLTV，
 > 1~2 秒出结果，见下文「[极速实时比分](#极速实时比分scripts-hltv-live)」。
 
-## 安装
+### 安装
 
 ```bash
 git clone <repo> && cd hltv-mcp
@@ -46,7 +75,26 @@ python3 -m venv .venv
 用来提供「界面上看不见」的虚拟显示。装不了浏览器（比如 CI）就改用 HTTP 后端：
 `pip install -e ".[http]"` 并设置 `HLTV_BACKEND=http`。
 
-## 接入 MCP 客户端
+> **`curl_cffi` 是可选依赖。** 只有 HTTP 后端需要它，默认的浏览器后端用不到。
+> 它需要编译 curl-impersonate + BoringSSL，在 Android 等平台上很难装成功，因此**不要**
+> 把它加回 `dependencies`。
+
+#### Android / Termux 离线安装（零编译）
+
+Termux 上装 Python 依赖最痛的一环是现场编译原生扩展（`lxml`、`cryptography`、`pydantic_core`…）。
+本仓库提供一个**预编译好的离线包**，解压后一条命令装完，**全程不编译任何东西**：
+
+```bash
+tar xzf hltv-mcp-termux-offline.tar.gz
+cd hltv-mcp-termux-offline
+bash install.sh
+```
+
+包里已经放了全部 30 个 wheel（含 Android ARM64 版的 `pydantic_core`），安装时用
+`--no-index` 强制只读本地文件，**完全不访问 PyPI**。详见
+[Releases](https://github.com/frogg435/hltv-mcp/releases) 页面的离线包说明。
+
+### 接入 MCP 客户端
 
 在客户端的 MCP 配置里加上：
 
@@ -92,7 +140,7 @@ python3 -m venv .venv
 }
 ```
 
-## 工具清单
+### 工具清单
 
 | 工具 | 说明 |
 |---|---|
@@ -117,9 +165,9 @@ python3 -m venv .venv
 
 全部只读，没有任何写操作。
 
-## 工作原理与已知限制
+### 工作原理与已知限制
 
-### 取页面的三种后端
+#### 取页面的三种后端
 
 | 后端 | 怎么用 | 特点 |
 |---|---|---|
@@ -129,7 +177,7 @@ python3 -m venv .venv
 
 `HLTV_BACKEND=auto`（默认）/ `browser` / `http` / `hybrid` 控制选择，见下文「后端选择」。
 
-### Cloudflare
+#### Cloudflare
 
 HLTV 在 Cloudflare 之后。实测（**在出口 IP 干净的前提下**）：
 
@@ -143,7 +191,7 @@ HLTV 在 Cloudflare 之后。实测（**在出口 IP 干净的前提下**）：
 
 HTTP 后端用 `curl_cffi` 且 `impersonate="safari17_0"`。换网络环境后最优指纹可能不同，可用 `HLTV_IMPERSONATE` 覆盖。
 
-### 后端：默认用真实浏览器
+#### 后端：默认用真实浏览器
 
 Cloudflare 按 **IP 累积信誉**，封禁会逐级升级：
 
@@ -181,7 +229,7 @@ python scripts/browser_check.py
 2. 否则自己拉起一个浏览器，用**独立的持久化 profile**（位于 `~/.cache/hltv-mcp/chrome-profile`）
 3. MCP 退出时**只关掉自己拉起的那个实例**；你自己的浏览器不会被碰
 
-### 不打扰你的浏览
+#### 不打扰你的浏览
 
 这是硬性设计目标，不是「尽量」：
 
@@ -206,7 +254,7 @@ python scripts/browser_check.py
 
 `python scripts/browser_check.py` 里内置了这项检查，可以自己验证。
 
-### Android / Termux
+#### Android / Termux
 
 Termux 是明确支持的目标平台：**浏览器照样由本服务自己拉起、界面上看不见，
 不需要动你手机上的浏览器，也不需要 adb 转发。**
@@ -243,7 +291,7 @@ profile 已有实例运行时，新进程只会把标签页塞进旧实例、调
 安全边界：**绝不关闭你的浏览器**，不读取也不导出 cookie。用户如需登录态，自己在浏览器里
 登录即可，本项目不经手任何账号密码。
 
-#### 无头模式会被拦（实测）
+##### 无头模式会被拦（实测）
 
 一个必须说清楚的点：**`--headless` 会被 Cloudflare 拦**。
 
@@ -258,7 +306,7 @@ profile 已有实例运行时，新进程只会把标签页塞进旧实例、调
 
 不用 Xvfb 也没关系：只要有显示环境（桌面系统），走的就是普通有头模式。
 
-### 后端选择
+#### 后端选择
 
 | `HLTV_BACKEND` | 行为 |
 |---|---|
@@ -279,7 +327,7 @@ HTTP 全通。
 它的价值在弱设备 —— 手机/Termux 上渲染 1MB HTML 的代价比多一次网络往返更高。桌面用户
 直接用默认的 `auto` 就好。
 
-### 先诊断，再动手
+#### 先诊断，再动手
 
 ```bash
 python scripts/browser_check.py   # 默认后端：检查浏览器能不能用、能不能取到 HLTV
@@ -293,7 +341,7 @@ python scripts/health.py          # HTTP 后端：定位是 IP 级封禁还是�
 
 也可用代理（`HLTV_PROXY`）换出口。住宅 IP 效果最好；机房 IP 通常同样会被拦。
 
-### 限流
+#### 限流
 
 **请求频率是使用这个 MCP 时最需要注意的事。** 短时间密集请求会让当前出口 IP 被 Cloudflare 单独限流，表现为**某一路径持续 403，而其他路径正常**，且恢复需要数分钟到数小时。
 
@@ -308,7 +356,7 @@ python scripts/health.py          # HTTP 后端：定位是 IP 级封禁还是�
 
 如果某个工具持续报 403，把 `HLTV_MIN_INTERVAL` 调到 `5` 或更大，或换网络出口。
 
-### 地图 × 阵营的比赛数据
+#### 地图 × 阵营的比赛数据
 
 `hltv_get_match_stats` 能给出**某场 BO1/BO3/BO5 里，每张地图、每个阵营（CT/T）下每位选手**的完整数据：
 
@@ -338,7 +386,7 @@ python scripts/health.py          # HTTP 后端：定位是 IP 级封禁还是�
 * **比赛页的 "Detailed stats" 指向另一套 ID。** 比赛页是 `/matches/{id}`，
   统计页是 `/stats/matches/{另一个id}`，两者不通用，得先从比赛页里取出来。
 
-### 关于 `/stats/*` 与逐年 Rating
+#### 关于 `/stats/*` 与逐年 Rating
 
 `/stats/*` 路径（含**逐年 Rating** 所在的统计页）在 HTTP 后端下会被 Cloudflare 拦截。
 **启用浏览器后端后可以正常访问** —— 这是 `hltv_get_player_year_stats` 的前提。
@@ -361,7 +409,7 @@ python scripts/health.py          # HTTP 后端：定位是 IP 级封禁还是�
 注意 HLTV 的 Rating 体系改过版（1.0 → 2.0 → 2.1 → 3.0），**跨年份的 Rating 数值不可直接比较**，
 所以每一季都返回了 `rating_version` 供判断。
 
-### 一个名不副实的 URL
+#### 一个名不副实的 URL
 
 `/stats/teams/matches/{a}/{b}` 看起来是「a 与 b 的交手记录」，但**实测它返回的是 a 队的全部比赛** ——
 FaZe 的页面有 2063 张地图、131 个不同对手，第二个 ID 不起过滤作用，`?contextIds=` 参数也无效。
@@ -370,7 +418,7 @@ FaZe 的页面有 2063 张地图、131 个不同对手，第二个 ID 不起过�
 （FaZe vs Vitality = 81 张地图，37 胜 44 负，胜率 45.7%）。
 代价是要下载整个页面（约 5MB / 5 秒）。
 
-### 解析器维护
+#### 解析器维护
 
 HLTV 会改版，选择器可能失效。当某个工具抽不到数据时：
 
@@ -381,7 +429,7 @@ python scripts/hltv_inspect.py /team/6667/x --selector .profile-team-stat
 
 定位到新类名后改 `src/hltv_mcp/parsers.py` 里对应的解析函数即可。所有解析器都遵循「缺字段返回 None，不抛异常」的约定，页面局部变化不会让整个工具调用失败。
 
-## 速度
+### 速度
 
 耗时几乎全在两处：**浏览器冷启动**和**取页面本身**。现在分别这么处理：
 
@@ -407,7 +455,7 @@ python scripts/hltv_inspect.py /team/6667/x --selector .profile-team-stat
 > 选手的逐年 Rating」偏慢属于正常，同一个选手再查就快了。想连这个也消掉，把对应路径加进
 > `HLTV_WARMUP_PAGES` 即可。
 
-## 配置
+### 配置
 
 | 环境变量 | 默认 | 说明 |
 |---|---|---|
@@ -438,7 +486,7 @@ python scripts/hltv_inspect.py /team/6667/x --selector .profile-team-stat
 
 也识别标准的 `HTTPS_PROXY` / `ALL_PROXY`。
 
-## 极速实时比分：`scripts/hltv-live`
+### 极速实时比分：`scripts/hltv-live`
 
 MCP 里的 `hltv_get_live_scores` 走浏览器后端，准确但代价是等浏览器渲染。只想快速瞄一眼比分时，
 用仓库自带的脚本更划算 —— 它直接请求 `https://www.hltv.org/scores`（这条路径不受 Cloudflare
@@ -456,7 +504,7 @@ python scripts/hltv-live --cache     # 读守护进程缓存，毫秒级（不�
 比分与页面同步；相比之下浏览器后端冷启动要几十秒。脚本同样只读公开页面，
 请保持合理的轮询间隔（守护模式默认 15 秒）。
 
-## 诊断与测试
+### 诊断与测试
 
 ```bash
 python scripts/browser_check.py       # 默认后端：浏览器能否连接、能否取到 HLTV
@@ -475,12 +523,477 @@ python tests/smoke.py --only ranking player career
 限流或改版时，能立刻分清是**逻辑问题**还是**页面变了** —— 这个区分在本项目的开发过程中
 救过好几次场。
 
-## 合规声明
+### 合规声明
 
 本项目为**非官方**工具，与 HLTV.org 无关联。它只读取公开页面，不做任何写操作。
 
 请合理使用：保持默认的低请求频率，不要用于商业再分发或高频轮询。工具返回的数据版权归 HLTV 及其原始权利人所有。
 
-## 许可
+### 许可
+
+MIT
+
+---
+
+<div align="center">
+
+### 🌐 Language / 语言
+
+[简体中文](#简体中文) · [English](#english)
+
+</div>
+
+---
+
+<a id="english"></a>
+
+## English
+
+Query **HLTV.org** Counter-Strike data directly from your AI assistant — matches, results, live scores, world rankings, teams, players, news, and the event calendar.
+
+By default it fetches pages with a **real browser**: it runs **in the background, completely invisible**, and never disturbs the page you're currently reading.
+Supports Windows / macOS / Linux, plus **Android Termux**.
+
+### What it can answer
+
+| Question | Tool called |
+|---|---|
+| What matches are on today? | `hltv_get_matches` |
+| What's live right now? | `hltv_get_matches(live_only=True)` |
+| **What's the current score?** | **`hltv_get_live_scores()`** |
+| How has Vitality been doing lately? | `hltv_get_results(team="Vitality")` |
+| Who's in the world top 30 right now? | `hltv_get_team_ranking` |
+| ZywOo's rating and career achievements? | `hltv_get_player(name="ZywOo")` |
+| **How has ZywOo performed year by year?** | **`hltv_get_player_career(name="ZywOo")`** |
+| **What was ropz's rating each year?** | **`hltv_get_player_year_stats(name="ropz")`** |
+| **Who played well on CT side on Inferno in this match?** | **`hltv_get_match_stats(match_id, map="Inferno", side="ct")`** |
+| What's the prize pool for this Major? Who's attending? | `hltv_get_event(name="...")` |
+| How has FaZe been doing lately? | `hltv_get_team_matches(name="FaZe")` |
+| Who's stronger historically, FaZe or Vitality? | `hltv_get_head_to_head("FaZe", "Vitality")` |
+| Who's on FaZe's current roster? | `hltv_get_team(name="FaZe")` |
+| What's in the news lately? | `hltv_get_news` |
+| What big events are coming up? | `hltv_get_events` |
+
+**Every tool accepts either an ID or a name** — just write `name="Vitality"` and the server resolves it to an ID, so the model never has to run a separate search first.
+
+> Just want a **quick glance at the current score**? The repo ships `python scripts/hltv-live` — it bypasses the browser and talks to HLTV directly, returning in 1–2 seconds. See [Fast live scores](#fast-live-scoresscriptshltv-live) below.
+
+### Installation
+
+```bash
+git clone <repo> && cd hltv-mcp
+python3 -m venv .venv
+.venv/bin/pip install -e .
+```
+
+**No Playwright in the dependency list** — browser control is handled by a built-in native CDP client, with a single pure-Python `websocket-client` dependency. There are two reasons for this design: Playwright can't be installed on Termux/Android, and its `new_page()` always steals focus (see "Not disturbing your browsing" below).
+
+You need one of Chrome / Chromium / Edge installed locally. On Linux, installing `Xvfb` is also recommended to provide the invisible virtual display. If you can't install a browser (CI, for example), switch to the HTTP backend: `pip install -e ".[http]"` and set `HLTV_BACKEND=http`.
+
+> **`curl_cffi` is an optional dependency.** Only the HTTP backend needs it; the default browser backend does not. It requires compiling curl-impersonate + BoringSSL, which is very hard to get working on platforms like Android — so **don't** add it back to `dependencies`.
+
+#### Android / Termux offline install (zero compilation)
+
+The most painful part of installing Python dependencies on Termux is compiling native extensions on-device (`lxml`, `cryptography`, `pydantic_core`…). This repo provides a **prebuilt offline bundle** that installs with a single command and **compiles nothing at all**:
+
+```bash
+tar xzf hltv-mcp-termux-offline.tar.gz
+cd hltv-mcp-termux-offline
+bash install.sh
+```
+
+The bundle already contains all 30 wheels (including the Android ARM64 build of `pydantic_core`), and installation uses `--no-index` so pip reads **only** local files and **never touches PyPI**. See the bundle notes on the [Releases](https://github.com/frogg435/hltv-mcp/releases) page.
+
+### Wiring it into an MCP client
+
+Add this to your client's MCP configuration:
+
+```json
+{
+  "mcpServers": {
+    "hltv": {
+      "command": "/absolute/path/hltv-mcp/.venv/bin/python",
+      "args": ["-m", "hltv_mcp"],
+      "env": {
+        "PYTHONPATH": "/absolute/path/hltv-mcp/src"
+      }
+    }
+  }
+}
+```
+
+After installing with `pip install -e .`, you can also use the command entry point directly:
+
+```json
+{
+  "mcpServers": {
+    "hltv": { "command": "/absolute/path/hltv-mcp/.venv/bin/hltv-mcp" }
+  }
+}
+```
+
+**No environment variables are required.** On startup the server **warms up** in the background: it launches the browser and fetches the schedule, live scores, results and rankings pages once each. In practice Cloudflare issues an extra real challenge on the **first visit to certain paths** (10–25 seconds), so doing this at startup absorbs that cost up front — **your very first query is already warm**.
+
+Warmup **yields**: after the first page it waits 8 seconds before each subsequent page to check whether you're querying, and stops immediately if a request comes in. It never queues slow requests ahead of yours. Afterwards the same browser instance is reused, and it's shut down automatically when the MCP server exits.
+
+A few optional tuning knobs:
+
+```json
+{
+  "env": {
+    "HLTV_BACKEND": "auto",
+    "HLTV_BROWSER_VISIBLE": "0"
+  }
+}
+```
+
+### Tool reference
+
+| Tool | Description |
+|---|---|
+| `hltv_search` | Search players/teams/events/news, name → ID |
+| `hltv_get_matches` | Schedule (upcoming + live), filterable by team/event, live-only option |
+| `hltv_get_live_scores` | **Live score snapshot**: ongoing matches, current map round count, maps won (poll for progress) |
+| `hltv_get_results` | Results with scores and winner, paginated |
+| `hltv_get_match` | Single match detail: map scores + **per-map, per-team player stats** (nickname, player ID, nationality, K-D, ADR, KAST, Rating, Swing) |
+| `hltv_get_team_ranking` | World team rankings (with points) |
+| `hltv_get_team` | Team profile: ranking, coach, roster |
+| `hltv_get_player` | Player profile: Rating 3.0, ability ratings, career honours summary |
+| `hltv_get_player_career` | **Year-by-year career**: teams per year, Top 20 placements by year, awards, titles, MVPs |
+| `hltv_get_player_year_stats` | **Year-by-year rating and detailed stats**: Rating, K/D, ADR, maps played, rating vs Top 5/10/20 opponents |
+| `hltv_get_match_stats` | **Per-map, per-side (CT/T) player stats for a single match**: Op.K-D, multi-kills, KAST, 1vX, headshots, ADR, Rating |
+| `hltv_get_event` | Event detail: prize pool, dates, location, VRS weight, attending teams, placements and prize distribution |
+| `hltv_get_team_matches` | Recent team results: date, opponent, score, win/loss |
+| `hltv_get_head_to_head` | Head-to-head record: per-map detail + aggregated win rate by map |
+| `hltv_get_news` | News list |
+| `hltv_get_news_article` | News article body |
+| `hltv_get_events` | Event calendar |
+| `hltv_backend_status` | Which backend is in use, whether the browser is available; call this first when troubleshooting "no data" |
+
+Everything is read-only; there are no write operations.
+
+### How it works, and known limitations
+
+#### Three backends for fetching pages
+
+| Backend | How | Characteristics |
+|---|---|---|
+| **Browser** (default) | Fetches pages with a real browser | Most reliable against Cloudflare; the only one that can do click interactions; requires a local browser |
+| **HTTP** | `curl_cffi` + Safari TLS fingerprint | Fast, light, no browser needed; but can't get past Cloudflare's path-level rules |
+| **hybrid** | Tries HTTP first, falls back to the browser when blocked | Both capabilities; the cost is a half-second probe on every request |
+
+`HLTV_BACKEND=auto` (default) / `browser` / `http` / `hybrid` controls the choice; see "Backend selection" below.
+
+#### Cloudflare
+
+HLTV sits behind Cloudflare. Measured results (**assuming a clean egress IP**):
+
+| Method | Result |
+|---|---|
+| Plain `requests` / `curl` | ❌ 403 "Just a moment..." |
+| `got-scraping` (Chrome TLS fingerprint) | ❌ 403 |
+| `curl_cffi` + Chrome / Firefox / Edge fingerprints | ❌ 403 |
+| **`curl_cffi` + Safari fingerprint** | ✅ **200, normal page** |
+| **Real browser** | ✅ **200, including `/stats/*`** |
+
+The HTTP backend uses `curl_cffi` with `impersonate="safari17_0"`. The optimal fingerprint may differ on another network; override it with `HLTV_IMPERSONATE`.
+
+#### Backend: a real browser by default
+
+Cloudflare accumulates **IP reputation**, and bans escalate in stages:
+
+```
+Clean IP  →  one path blocked (e.g. /stats/*)  →  whole site 403 (even the homepage)
+```
+
+Once you're in the second or third stage, **changing the client disguise doesn't help** — we measured it:
+
+| Attempt | Result |
+|---|---|
+| 7 different TLS fingerprints (Safari / Chrome 131 / 124 / 120 / Firefox / Edge) | all 403 |
+| Headless Chromium / headed Chromium (Xvfb) / headed real Chrome | all 403 |
+| Adding stealth scripts (scrubbing `navigator.webdriver` etc.) | no effect |
+
+**What actually works is a real browser.** Measured side by side (**same IP, same moment**):
+
+| Method | `/` | `/stats/players/individual/11816/ropz` |
+|---|---|---|
+| `curl_cffi` (Safari fingerprint) | ❌ 403 | ❌ 403 |
+| **Real browser + persistent profile** | ✅ **200** | ✅ **200** |
+
+The difference isn't headed vs. headless — it's two things: the **complete fingerprint of a real browser**, and the use of a **persistent profile context**. An anonymous context gets blocked just the same.
+
+So the **default backend is the browser**, and it works **out of the box** — you don't need to start Chrome yourself first:
+
+```bash
+# Nothing to configure, just run it. (A separate profile is created in ~/.cache/hltv-mcp on first run.)
+python scripts/browser_check.py
+```
+
+The launcher does all of this automatically:
+
+1. If a browser with a debugging port is already running (or you set `HLTV_BROWSER_CDP`), reuse it
+2. Otherwise launch one with a **separate persistent profile** (at `~/.cache/hltv-mcp/chrome-profile`)
+3. On exit, **close only the instance it launched itself** — your own browser is never touched
+
+#### Not disturbing your browsing
+
+This is a hard design requirement, not a "best effort":
+
+* **Invisible.** On Linux the launcher creates its own Xvfb virtual display, so the browser runs headed but has no display device at all; on other desktop systems the window is moved off-screen. You see no window and no pop-ups.
+* **No focus stealing, no touching your tabs.** Every tab is created with CDP's `background=true` and closed immediately afterwards. The page you're reading is never navigated away or pushed to the background.
+
+Both were measured. Using `document.visibilityState` and `document.hasFocus()` as objective indicators, four real queries were run with the user's page open the whole time:
+
+| | Before query | Throughout / after query |
+|---|---|---|
+| User page URL | `example.com/` | unchanged |
+| `visibilityState` | `visible` | `visible` |
+| `hasFocus()` | unchanged | unchanged |
+| Tab count | 1 | 1 (no leftovers) |
+
+A control experiment was run too: with the earlier `background=false` implementation, the same scenario immediately turned the user's page `visibilityState` to `hidden` and `hasFocus()` to `false` — i.e. it got pushed aside. This is one of the reasons this project **doesn't use Playwright** (its `new_page()` always activates the new tab).
+
+`python scripts/browser_check.py` has this check built in, so you can verify it yourself.
+
+#### Android / Termux
+
+Termux is an explicitly supported target platform: **the service still launches the browser itself and it stays invisible; your phone's browser is untouched, and no adb forwarding is needed.**
+
+```bash
+pkg install tur-repo x11-repo
+pkg install chromium xorg-server-xvfb python
+pip install hltv-mcp
+```
+
+A few easy places to trip up:
+
+* **Chromium isn't in the official main repo** — it lives in TUR (`tur-repo`) and depends on the GTK/X11 libraries from `x11-repo` (linked even in headless mode). But note: `tur-repo` and `x11-repo` — the two **repository-enabling packages themselves — are in the main repo**, so the official sources alone are enough; no third-party repo is required. Conversely, if `pkg install chromium` says the package can't be found, first check that those two `pkg install tur-repo x11-repo` commands succeeded.
+* **Chromium's executable is called `chromium-browser`**, not `chromium`. This project finds it automatically (`$PREFIX/bin/chromium-browser`).
+* **`xorg-server-xvfb` is mandatory** — it *is* how "invisible" is implemented: the browser runs headed but with no display device. Without it, you can only fall back to headless mode, and headless gets blocked by Cloudflare.
+* Android-specific flags `--no-sandbox` (setuid sandboxing is unavailable on Android) and `--disable-gpu` are added automatically at launch.
+* Termux puts its temp directory at `$TMPDIR` (`/data/data/com.termux/files/usr/tmp`) rather than `/tmp`, and the X11 socket lives there too — this project searches all three locations.
+
+`playwright` **cannot be installed** here — it throws `Unsupported platform: android` outright, and its `new_page()` always steals focus. So this project doesn't use it, and instead ships its own native CDP client (requiring only pure-Python `websocket-client`).
+
+The separate profile isn't an arbitrary choice: first, it avoids exposing your everyday browsing data on a debugging port; second, when a Chrome instance is already running under the same profile, a new process just stuffs tabs into the old instance and never opens a debugging port at all. It has a welcome side effect too — once the profile persists, `cf_clearance` survives, so subsequent startups hit noticeably fewer challenges.
+
+Security boundary: **your browser is never closed**, and cookies are neither read nor exported. If you need an authenticated session, log in yourself in the browser — this project never handles any credentials.
+
+##### Headless mode gets blocked (measured)
+
+One thing that must be stated clearly: **`--headless` gets blocked by Cloudflare.**
+
+| Mode | Homepage | `/matches` | `/stats/players/...` |
+|---|---|---|---|
+| `--headless=new` | ❌ challenge page | ❌ challenge page | ❌ challenge page |
+| Headed (incl. Xvfb virtual display) | ✅ 200 | ✅ 200 | ✅ **964KB** |
+
+So when there's "no display", you must **not** simply fall back to headless — that amounts to silently failing. This project's approach: on Linux, if no usable display is detected but Xvfb is available, it **creates a virtual display itself** (e.g. `:99`) so the browser still runs headed. This path was verified to work in containers too, and the virtual display is torn down on exit along with everything else.
+
+Not using Xvfb is fine as well: as long as a display environment exists (a desktop OS), it just runs in ordinary headed mode.
+
+#### Backend selection
+
+| `HLTV_BACKEND` | Behaviour |
+|---|---|
+| `auto` (default) | **Browser preferred**; falls back to HTTP only when the browser **can't start at all** |
+| `browser` | Force the browser. Errors out rather than falling back |
+| `http` | Force HTTP. For environments where a browser can't be installed (CI, bare containers) |
+| `hybrid` | **HTTP preferred**; switches to the browser when Cloudflare blocks it, and remembers "which kinds of paths require the browser" |
+
+Note the boundary of `auto`'s fallback: **"the page was blocked by Cloudflare" does not count as "can't start"**, and doesn't trigger a fallback — because the HTTP backend would receive the same challenge page, and falling back would only make the error harder to understand. Only "browser not found / can't reach the debugging port / startup timed out" trigger the fallback, which is announced once on stderr before switching.
+
+`hybrid` is the "fast path" version of `auto` rather than a watered-down one — the data it ultimately returns is identical, it just reverses the order: spend half a second on a cheap request first, and only launch the browser if blocked. In practice `/stats/*` has its own blocking rule while every other path goes through fine over HTTP.
+
+But to be honest: **on desktop, hybrid isn't faster than the default browser backend** (both measured at around 1 second locally). Its value is on weak devices — on a phone/Termux, rendering 1MB of HTML costs more than an extra network round trip. Desktop users should just use the default `auto`.
+
+#### Diagnose before you act
+
+```bash
+python scripts/browser_check.py   # default backend: is the browser usable, can it reach HLTV
+python scripts/health.py          # HTTP backend: distinguish IP-level from path-level blocking
+```
+
+How to read `health.py`:
+
+- **Homepage also 403** → IP-level ban. Change your egress IP, or switch to the default browser backend
+- **Only specific paths 403** → path-level rule (`/stats/*` falls in this category); the browser backend is unaffected
+
+You can also change the egress with a proxy (`HLTV_PROXY`). Residential IPs work best; datacenter IPs are typically blocked just the same.
+
+#### Rate limiting
+
+**Request frequency is the single most important thing to watch when using this MCP.** A burst of dense requests gets the current egress IP rate-limited by Cloudflare individually, showing up as **one path returning 403 persistently while others work fine**, and recovery takes minutes to hours.
+
+The client does the following by default:
+
+- **Browser backend**: **0.5 s interval + 0–0.8 s random jitter** (`HLTV_BROWSER_MIN_INTERVAL` / `HLTV_JITTER`). A browser request *is* "a human paging through a site" — Cloudflare judges it on entirely different grounds than bare HTTP, so throttling yourself to crawler standards just slows you down for nothing
+- **HTTP backend**: **3 s interval** (`HLTV_MIN_INTERVAL`). Bare HTTP requests look most like a crawler and are throttled most readily
+- In-memory cache: live scores 15 s, schedule 60 s, results 120 s, news 300 s, rankings 1 h, player/team profiles 30 min
+- On a 403 it does **not** immediately rebuild the session (that would discard cookies already passed and make things worse); it backs off and retries first, and only swaps the session on the final attempt
+
+If a tool keeps returning 403, raise `HLTV_MIN_INTERVAL` to `5` or higher, or change your network egress.
+
+#### Per-map, per-side match data
+
+`hltv_get_match_stats` returns complete data for **every player, on every map, on each side (CT/T), in a given BO1/BO3/BO5**:
+
+```jsonc
+// hltv_get_match_stats(match_id=2399253, map="Inferno", side="ct")
+{
+  "available_maps": ["2 - 1 Best of 3", "13 - 0 Dust2", "8 - 13 Inferno", "13 - 9 Mirage"],
+  "results": [{
+    "map": "Inferno",
+    "sides": {
+      "ct": [
+        {"team": "100 Thieves", "players": [
+          {"nickname": "rain", "opening_kd": "3 : 0", "multi_kills": "2", "kast": "83.3%",
+           "clutches_1vx": "0", "kills": "8 (4)", "assists": "5 (0)", "deaths": "8 (0)",
+           "adr": "78.8", "round_swing": "-2.27%", "rating": "0.90"}
+        ]}
+      ]
+    }
+  }]
+}
+```
+
+Two implementation notes:
+
+* **Maps must be clicked to switch; sides need not be.** In practice the DOM contains all three tables `totalstats` / `ctstats` / `tstats` simultaneously, and only the currently selected one lacks the `hidden` class — so all three sides are read in one go, and clicking is only needed for maps.
+* **"Detailed stats" on the match page points at a different ID.** The match page is `/matches/{id}` while the stats page is `/stats/matches/{another-id}`; they aren't interchangeable, so the latter has to be extracted from the former.
+
+#### About `/stats/*` and year-by-year ratings
+
+The `/stats/*` paths (including the stats page where **year-by-year ratings** live) are blocked by Cloudflare under the HTTP backend. **With the browser backend enabled they load normally** — this is a prerequisite for `hltv_get_player_year_stats`.
+
+```jsonc
+// hltv_get_player_year_stats(player_id=11816, years=[2019, 2022, 2024, 2025, 2026])
+{
+  "seasons": [
+    {"year": 2019, "rating_version": "Rating 2.0", "rating": 1.19, "kd_ratio": 1.29,
+     "adr": 80.4, "maps_played": 200, "kills": 4005},
+    {"year": 2024, "rating_version": "Rating 3.0", "rating": 1.13, "kd_ratio": 1.18,
+     "adr": 75.9, "maps_played": 189, "kills": 3035},
+    {"year": 2025, "rating_version": "Rating 3.0", "rating": 1.18, "kd_ratio": 1.24,
+     "adr": 78.6, "maps_played": 200, "kills": 3182}
+  ],
+  "career_total": {"rating_version": "Rating 2.0", "rating": 1.15, "maps_played": 1915}
+}
+```
+
+Note that HLTV's Rating system has been revised over time (1.0 → 2.0 → 2.1 → 3.0), so **rating values are not directly comparable across years**; `rating_version` is returned for each season so you can tell.
+
+#### A misleading URL
+
+`/stats/teams/matches/{a}/{b}` looks like "the head-to-head record between a and b", but **in practice it returns all of team a's matches** — FaZe's page has 2063 maps across 131 distinct opponents, the second ID does no filtering, and the `?contextIds=` parameter has no effect either.
+
+So `hltv_get_head_to_head` was changed to **filter locally by opponent name**, which is what produces a genuine H2H (FaZe vs Vitality = 81 maps, 37 wins 44 losses, 45.7% win rate). The cost is downloading the whole page (about 5MB / 5 seconds).
+
+#### Maintaining the parsers
+
+HLTV redesigns its pages, and selectors may stop matching. When a tool returns no data:
+
+```bash
+python scripts/hltv_inspect.py /matches                 # dump the page's class-name distribution
+python scripts/hltv_inspect.py /team/6667/x --selector .profile-team-stat
+```
+
+Once you've located the new class names, update the corresponding parsing function in `src/hltv_mcp/parsers.py`. All parsers follow the rule "missing field → return None, never raise", so a partial page change won't fail the entire tool call.
+
+### Speed
+
+Time is spent almost entirely in two places: **browser cold start** and **fetching the page itself**. Here's how each is handled:
+
+| Problem | Approach |
+|---|---|
+| Cold start (launching the browser + passing the Cloudflare challenge) all landing on the first query | Background **warmup** at startup moves those seconds into the gap between "client handshake" and "you typing"; warmup also yields and never blocks your query |
+| Certain paths get an extra Cloudflare challenge on **first** visit (10–25 s) | The commonly used paths (schedule / live scores / results / rankings) are all in the warmup list, absorbing that cost at startup |
+| The browser backend throttled to crawler standards (a hard 3 s wait per request) | The browser backend switched to a 0.5 s interval; the HTTP backend keeps 3 s |
+| The match stats page had two fixed `sleep`s (3.5 s + 3.0 s) | Replaced with "wait for the element to appear / for content to change", typically returning in under 1 second |
+| After passing the challenge, the page reloads via JS, leaving a brief shell with "correct title, incomplete content" | Detected, then waits for the content to stabilise before reading — avoiding a page of partial data being returned without any error |
+
+Measured locally (same machine, same network, timed page by page):
+
+| Scenario | Before | After |
+|---|---|---|
+| Routine pages (schedule / results / rankings / live scores) | 2.6 – 4.2 s | **0.3 – 2.0 s** |
+| Live scores **first** query (hits the path challenge) | 28 s | **0.8 s** (challenge absorbed by startup warmup) |
+| Detailed match stats (`hltv_get_match_stats`) | 8 s+ (6.5 s of it just fixed waiting) | **~2 s** |
+| First query (cold start) | 2 – 15 s | **≈ 0** (absorbed by startup warmup) |
+
+> One thing **isn't** fixable in code: for paths **not in the warmup list** (especially `/stats/*`), the first visit may still hit a real challenge, measured at 9–25 seconds, after which the same path is consistently around 1 second. So "the first time you look up a player's year-by-year rating" being slow is normal — querying the same player again is fast. To eliminate even that, add the path to `HLTV_WARMUP_PAGES`.
+
+### Configuration
+
+| Environment variable | Default | Description |
+|---|---|---|
+| `HLTV_BACKEND` | `auto` | Backend: `auto` (browser preferred) / `browser` (forced) / `http` (forced HTTP) / `hybrid` (HTTP preferred, switch to browser when blocked) |
+| `HLTV_WARMUP` | `1` | Warm up the browser in the background at startup so the first query doesn't wait for a cold start. Set `0` to disable |
+| `HLTV_WARMUP_PAGES` | `/matches,/livescore,/results,/ranking/teams,/search` | Pages fetched in sequence during warmup. In practice Cloudflare issues an extra real challenge on the **first visit to certain paths** (`/livescore`, `/search`, `/stats/*`) taking 10–25 s; running through them at startup makes user queries warm |
+| `HLTV_WARMUP_IDLE` | `8` | Seconds to wait before warming the next page, to see whether the user is doing anything. Yields immediately if a request arrives |
+| `HLTV_BROWSER_CDP` | empty | Reuse an **externally launched** browser, e.g. `http://127.0.0.1:9222`. Leave empty to let the service prepare one |
+| `HLTV_BROWSER_AUTOLAUNCH` | `1` | Set `0` to forbid auto-launching a browser and only reuse an existing instance |
+| `HLTV_BROWSER_VISIBLE` | `0` | Set `1` to make the browser window visible (for debugging). Hidden by default |
+| `HLTV_BROWSER_HEADLESS` | automatic | Set `1` to force headless. **Note that headless gets blocked by Cloudflare** — avoid unless necessary |
+| `HLTV_CHROME_BIN` | auto-detected | Path to the browser executable (Chrome/Chromium/Edge) |
+| `HLTV_BROWSER_PORT` | `9222` | Preferred debugging port when auto-launching; switches automatically if occupied |
+| `HLTV_CHROME_PROFILE` | `~/.cache/hltv-mcp/chrome-profile` | Separate profile directory used when auto-launching |
+| `HLTV_CACHE_DIR` | platform cache dir | Stores the profile, browser logs and port record |
+| `HLTV_PROXY` | empty | Egress proxy, e.g. `http://user:pass@host:port` or `socks5://host:port`. **The primary remedy for IP-level blocking** |
+| `HLTV_MIN_INTERVAL` | `3.0` | Minimum interval between two requests for the **HTTP backend** (seconds) |
+| `HLTV_BROWSER_MIN_INTERVAL` | `0.5` | Minimum interval between two requests for the **browser backend** (seconds) |
+| `HLTV_HYBRID_MIN_INTERVAL` | `1.0` | Minimum interval for the probing HTTP request in hybrid mode (seconds) |
+| `HLTV_JITTER` | `0.8` | Upper bound of the random jitter added to intervals (seconds) |
+| `HLTV_TIMEOUT` | `40` | Single-request timeout (seconds) |
+| `HLTV_MAX_RETRIES` | `3` | Number of retries on failure |
+| `HLTV_NAV_RETRIES` | `3` | Page navigation retries (browser backend) |
+| `HLTV_CHALLENGE_WAIT` | `25` | Maximum wait for the Cloudflare challenge to pass (seconds) |
+| `HLTV_CHALLENGE_POLL` | `0.6` | Challenge polling interval (seconds) |
+| `HLTV_BLOCK_ASSETS` | `0` | Set `1` to block images/fonts/ad analytics scripts. Measured: HLTV is mostly server-rendered HTML, so enabling this is actually slightly slower on desktop; worth trying on weak devices |
+| `HLTV_IMPERSONATE` | `safari17_0` | TLS fingerprint for the HTTP backend; also accepts `chrome131`, `firefox135`, etc. |
+
+The standard `HTTPS_PROXY` / `ALL_PROXY` variables are recognised too.
+
+<a id="fast-live-scoresscriptshltv-live"></a>
+
+### Fast live scores: `scripts/hltv-live`
+
+`hltv_get_live_scores` inside the MCP goes through the browser backend — accurate, but it pays for browser rendering. When you just want a quick glance at the score, the script shipped in the repo is a better deal: it requests `https://www.hltv.org/scores` directly (this path isn't blocked by Cloudflare — it's the `/matches/*` style pages that are; roughly 40KB gzipped) without launching a browser at all:
+
+```bash
+python scripts/hltv-live             # list all currently ongoing matches (~1.5–2.5 s)
+python scripts/hltv-live falcons     # only those whose team name contains "falcons" (multiple keywords allowed)
+python scripts/hltv-live --json      # JSON output
+python scripts/hltv-live --watch 15  # daemon mode: poll every 15 seconds and write a cache
+python scripts/hltv-live --cache     # read the daemon's cache, millisecond-level (no network)
+```
+
+Measured (Android/Termux, same match): the direct script takes 1.6–2.4 s, reading the daemon cache takes about 60 ms, and scores match the page; the browser backend's cold start, by contrast, takes tens of seconds. The script also only reads public pages — please keep polling at a reasonable interval (daemon mode defaults to 15 seconds).
+
+### Diagnostics and tests
+
+```bash
+python scripts/browser_check.py       # default backend: can the browser connect, can it reach HLTV
+python scripts/health.py              # HTTP backend: distinguish IP-level vs path-level blocking
+python scripts/health.py --json
+python scripts/hltv_inspect.py /matches   # page structure dump, for locating new selectors after a redesign
+python scripts/hltv-live --watch 15       # fast live scores (daemon mode, writes a cache)
+
+python tests/test_parsers.py          # offline: parsing logic
+python tests/test_launcher.py         # offline: backend selection, display environment, Termux detection, CDP probing
+python tests/smoke.py                 # networked smoke test (~1.5 minutes)
+python tests/smoke.py --only ranking player career
+```
+
+The two-layer split is deliberate: the offline tests verify the logic against fixtures isomorphic to the live pages and don't depend on the network, so when HLTV rate-limits or redesigns, you can immediately tell whether it's a **logic problem** or **the page changed** — that distinction has saved the day several times during this project's development.
+
+### Compliance
+
+This project is an **unofficial** tool and is not affiliated with HLTV.org. It only reads public pages and performs no write operations.
+
+Please use it sensibly: keep the default low request rate, and don't use it for commercial redistribution or high-frequency polling. Copyright in the data returned by the tools belongs to HLTV and its original rights holders.
+
+### License
 
 MIT

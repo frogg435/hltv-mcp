@@ -11,8 +11,6 @@ dependencies = [
     # 不用 Playwright：它在 Android/Termux 上装不起来（官方不支持 android 平台），
     # 而且它的 new_page() 一定会激活新标签页，会把用户正在看的页面顶掉。
     "websocket-client>=1.6",
-    # HTTP 后端的 TLS 指纹伪装（HLTV_BACKEND=http 时使用）
-    "curl_cffi>=0.7",
     "beautifulsoup4>=4.12",
     "lxml>=5.0",
 ]
@@ -20,6 +18,10 @@ dependencies = [
 [project.optional-dependencies]
 # HTTP-only 部署：不想装浏览器时用，配合 HLTV_BACKEND=http
 # 安装：pip install -e ".[http]" 然后设置 HLTV_BACKEND=http
+#
+# 注意 curl_cffi 是可选依赖，不在上面的 dependencies 里：它要编译
+# curl-impersonate + BoringSSL，在 Android/Termux 上基本编不出来，
+# 而默认的浏览器后端根本用不到它。别把它加回 dependencies。
 http = ["curl_cffi>=0.7"]
 
 [project.scripts]

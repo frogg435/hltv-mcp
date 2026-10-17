@@ -17,6 +17,7 @@ from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
+from . import __version__
 from . import parsers as P
 from .client import HltvError, get_client
 from .resolver import require_id, search as _search
@@ -26,7 +27,7 @@ MAX_LIMIT = 100
 server = MCPServer(
     name="hltv",
     title="HLTV.org",
-    version="1.6.0",
+    version=__version__,
     instructions=(
         "查询 HLTV.org 的 Counter-Strike 赛事数据：赛程、赛果、世界排名、战队、选手、"
         "新闻与赛事日历。所有工具都接受数字 id 或名称（如 \"Vitality\"、\"ZywOo\"），"
